@@ -6,4 +6,6 @@ module.exports = {
   ...require('./layout'),
   ...require('./recurrence'),
   ...require('./tasks'),
+  ...require('./reminders'),
+  ...require('./reminder-engine'),
 };

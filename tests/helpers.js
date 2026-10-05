@@ -12,6 +12,14 @@ function at(dateKeyString, hhmm) {
   return d;
 }
 
+// Like at(), but also accepts seconds: atS('2026-10-04', '08:50:45')
+function atS(dateKeyString, hhmmss) {
+  const [h, m, sec] = hhmmss.split(':').map(Number);
+  const d = parseDateKey(dateKeyString);
+  d.setHours(h, m, sec || 0, 0);
+  return d;
+}
+
 function day(key, fajr, dhuhr, asr, maghrib, isha) {
   return {
     fajr: at(key, fajr),
@@ -37,6 +45,15 @@ const TABLE = {
   '2026-07-16': day('2026-07-16', '05:26', '12:00', '15:40', '19:00', '20:30'),
 };
 
+// Fill the gaps around the example days with plausible times, so tests that look a few days
+// ahead or behind do not fail just because a date is missing from the table above.
+(function fillAutumnDays() {
+  const { addDaysToKey } = require('../src/core/time');
+  for (let key = '2026-09-25'; key <= '2026-10-25'; key = addDaysToKey(key, 1)) {
+    if (!TABLE[key]) TABLE[key] = day(key, '05:08', '11:46', '15:10', '17:55', '19:15');
+  }
+})();
+
 function provider(key) {
   const t = TABLE[key];
   if (!t) throw new Error(`Test provider has no times for ${key}`);
@@ -48,4 +65,4 @@ function constantProvider(key) {
   return day(key, '05:05', '11:48', '15:14', '18:00', '19:20');
 }
 
-module.exports = { at, provider, constantProvider };
+module.exports = { at, atS, provider, constantProvider };
