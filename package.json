@@ -1,0 +1,13 @@
+{
+  "name": "daily-planner",
+  "version": "0.1.0",
+  "description": "Daily Planner - task manager with prayer-time zones",
+  "private": true,
+  "main": "src/core/index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "adhan": "^4.4.3"
+  }
+}
