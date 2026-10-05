@@ -19,10 +19,54 @@ function parseDateKey(key) {
   return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
 }
 
+// ---- Calendar-date arithmetic on date keys (uses UTC maths, so DST never interferes) ----
+
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function makeKey(y, m, d) {
+  return `${String(y).padStart(4, '0')}-${pad(m)}-${pad(d)}`;
+}
+
+function splitKey(key) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (!match) throw new Error(`Invalid date key: ${key}`);
+  return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };
+}
+
+// Whole days since 1970-01-01 for a calendar date.
+function keyToDayNumber(key) {
+  const { y, m, d } = splitKey(key);
+  return Math.round(Date.UTC(y, m - 1, d) / 86400000);
+}
+
+function dayNumberToKey(n) {
+  const date = new Date(n * 86400000);
+  return makeKey(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+}
+
+function isValidKey(key) {
+  if (typeof key !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(key)) return false;
+  return dayNumberToKey(keyToDayNumber(key)) === key;
+}
+
 function addDaysToKey(key, days) {
-  const d = parseDateKey(key);
-  d.setDate(d.getDate() + days);
-  return dateKey(d);
+  return dayNumberToKey(keyToDayNumber(key) + days);
+}
+
+// 0 = Sunday ... 6 = Saturday
+function weekdayOfKey(key) {
+  const { y, m, d } = splitKey(key);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+function daysInMonth(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+// "Oct 1", or "Oct 1, 2027" when withYear is true
+function formatKeyShort(key, withYear = false) {
+  const { y, m, d } = splitKey(key);
+  return withYear ? `${MONTH_SHORT[m - 1]} ${d}, ${y}` : `${MONTH_SHORT[m - 1]} ${d}`;
 }
 
 function addMinutes(date, minutes) {
@@ -53,8 +97,17 @@ function formatTime12(date) {
 
 module.exports = {
   MS_PER_MINUTE,
+  MONTH_SHORT,
   dateKey,
   parseDateKey,
+  makeKey,
+  splitKey,
+  keyToDayNumber,
+  dayNumberToKey,
+  isValidKey,
+  weekdayOfKey,
+  daysInMonth,
+  formatKeyShort,
   addDaysToKey,
   addMinutes,
   minutesBetween,

@@ -43,4 +43,9 @@ function provider(key) {
   return t;
 }
 
-module.exports = { at, provider };
+// Same prayer times every day. Handy for tests that span many dates.
+function constantProvider(key) {
+  return day(key, '05:05', '11:48', '15:14', '18:00', '19:20');
+}
+
+module.exports = { at, provider, constantProvider };
