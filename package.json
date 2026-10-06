@@ -1,13 +1,63 @@
 {
   "name": "daily-planner",
-  "version": "0.1.0",
+  "productName": "Daily Planner",
+  "version": "0.4.0",
   "description": "Daily Planner - task manager with prayer-time zones",
   "private": true,
-  "main": "src/core/index.js",
+  "author": "Daily Planner",
+  "main": "src/main/main.js",
   "scripts": {
-    "test": "node --test"
+    "start": "electron .",
+    "test": "node --test",
+    "dist": "electron-builder --win --publish never"
   },
   "dependencies": {
     "adhan": "^4.4.3"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.dailyplanner.app",
+    "productName": "Daily Planner",
+    "copyright": "Daily Planner",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Daily Planner",
+      "artifactName": "Daily-Planner-Setup-${version}.exe",
+      "include": "build/installer.nsh"
+    },
+    "protocols": [
+      {
+        "name": "Daily Planner",
+        "schemes": [
+          "dailyplanner"
+        ]
+      }
+    ]
   }
 }

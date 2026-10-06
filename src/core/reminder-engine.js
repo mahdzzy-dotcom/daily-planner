@@ -164,7 +164,7 @@ class ReminderEngine {
           continue;
         }
         changed = true;
-        const occurrence = this.findOccurrence(tasks, provider, snooze.taskId, snooze.dateKey);
+        const occurrence = this.findOccurrence(tasks, provider, snooze.taskId, snooze.dateKey, settings);
         if (!occurrence || occurrence.done) continue; // task deleted, moved away, or already done
         const zone = deriveZone(provider, occurrence.start);
         const item = {
@@ -237,10 +237,11 @@ class ReminderEngine {
     }
   }
 
-  findOccurrence(tasks, provider, taskId, dateKey) {
+  findOccurrence(tasks, provider, taskId, dateKey, settings) {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return null;
-    return getOccurrences(provider, task, dateKey, dateKey)[0] || null;
+    const options = settings && settings.workingDays ? { workingDays: settings.workingDays } : {};
+    return getOccurrences(provider, task, dateKey, dateKey, options)[0] || null;
   }
 
   // ---- Notification buttons ----------------------------------------------------------------------

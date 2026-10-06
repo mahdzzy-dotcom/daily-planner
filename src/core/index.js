@@ -8,4 +8,8 @@ module.exports = {
   ...require('./tasks'),
   ...require('./reminders'),
   ...require('./reminder-engine'),
+  ...require('./cities'),
+  ...require('./settings'),
+  ...require('./data'),
+  ...require('./prayer-adapter'),
 };

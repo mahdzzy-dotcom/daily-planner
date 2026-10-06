@@ -53,6 +53,10 @@ function largestOffsetMinutes(tasks, settings) {
 // All TASK reminders whose notification time is after fromMs and at or before toMs.
 // Completed occurrences get no reminders. Sorted by notification time.
 function remindersInWindow(provider, tasks, fromMs, toMs, settings, options = {}) {
+  // Recurrence rules such as "last working day" need the user's working days from Settings.
+  if (settings && settings.workingDays && !options.workingDays) {
+    options = { ...options, workingDays: settings.workingDays };
+  }
   const margin = Math.ceil(largestOffsetMinutes(tasks, settings) / 1440);
   const fromKey = addDaysToKey(dateKey(new Date(fromMs)), -2);
   const toKey = addDaysToKey(dateKey(new Date(toMs)), 2 + margin);

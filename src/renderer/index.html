@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Daily Planner</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <button id="menu-btn" class="icon-btn" title="Menu" aria-label="Menu">☰</button>
+      <h1 class="app-title">DAILY PLANNER</h1>
+    </div>
+    <div class="topbar-right">
+      <div class="bell-wrap">
+        <button id="bell-btn" class="icon-btn" title="Upcoming reminders" aria-label="Upcoming reminders">🔔</button>
+        <div id="bell-panel" class="popover" hidden></div>
+      </div>
+      <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
+      <button id="add-btn" class="btn primary">+ Task</button>
+    </div>
+    <div id="menu-panel" class="popover menu-panel" hidden></div>
+  </header>
+
+  <main id="view"></main>
+
+  <div id="dialog-root"></div>
+  <div id="toast-root" aria-live="polite"></div>
+
+  <script src="dom.js"></script>
+  <script src="form.js"></script>
+  <script src="settings.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
