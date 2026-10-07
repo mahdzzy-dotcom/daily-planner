@@ -82,6 +82,7 @@ function normalizeTask(raw) {
     overrides: isPlainObject(raw.overrides) ? raw.overrides : {},
     completions: isPlainObject(raw.completions) ? raw.completions : {},
   };
+  if (typeof raw.continuedFrom === 'string' && raw.continuedFrom !== '') task.continuedFrom = raw.continuedFrom;
   const errors = validateTask(task);
   return errors.length ? { error: errors.join('; ') } : { task };
 }

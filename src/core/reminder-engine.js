@@ -240,7 +240,7 @@ class ReminderEngine {
   findOccurrence(tasks, provider, taskId, dateKey, settings) {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return null;
-    const options = settings && settings.workingDays ? { workingDays: settings.workingDays } : {};
+    const options = { tasks, ...(settings && settings.workingDays ? { workingDays: settings.workingDays } : {}) };
     return getOccurrences(provider, task, dateKey, dateKey, options)[0] || null;
   }
 

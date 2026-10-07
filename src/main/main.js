@@ -2,35 +2,51 @@
 
 // Daily Planner - Electron main process.
 //
-// Milestone 4 wiring: window, saved data, the planner service, the reminder engine with Windows
-// notifications, and links from notification buttons.
-// Milestone 5 adds: system tray, "close hides to the tray", start with Windows.
+// The app is a background task manager, not just a window:
+//   Windows start-up -> background operation -> system tray -> reminder engine -> Windows notifications
+//
+//   - Closing (X) or minimizing the window hides it to the tray; the app keeps running.
+//   - "Exit" in the tray menu is the only way to stop it (after a confirmation).
+//   - "Start with Windows" launches it at login, hidden in the tray.
+//   - Only one copy runs; launching it again brings the running copy forward.
+//   - Reminders come from the engine in this process, so they do not depend on the window.
 
 const path = require('path');
 const fs = require('fs');
-const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
+const {
+  app, BrowserWindow, ipcMain, dialog, Notification, Tray, Menu, nativeImage, powerMonitor,
+} = require('electron');
 
 const { PlannerService, PUBLIC_METHODS } = require('./service');
 const { FileStore } = require('./store');
 const { ReminderEngine } = require('../core/reminder-engine');
 const { formatTime12 } = require('../core/time');
 const { createElectronNotifier, findActionUrlInArgv, APP_ID, PROTOCOL } = require('./toast');
+const { createTray } = require('./tray');
 
 const ICON = path.join(__dirname, 'icon.png');
+const STARTUP_ARG = '--hidden'; // given to the app when Windows starts it at login
+const WATCHDOG_MS = 60000;
 
 let mainWindow = null;
 let service = null;
 let engine = null;
 let notify = null;
+let trayController = null;
+let watchdog = null;
 let rendererReady = false;
+let quitting = false; // true only when the app is really being closed
+let showOnReady = true;
+let lastLoginSetting = null;
+let lastOffset = null;
 const pendingEvents = []; // events waiting for the window to be ready
 
 function log(...args) {
-  // Written to the console only (visible when started from a terminal).
+  // Console only (visible when started from a terminal).
   console.error('[daily-planner]', ...args);
 }
 
-// ---- Talking to the window ------------------------------------------------------------------------------
+// ---- Talking to the window ---------------------------------------------------------------------------------
 
 function sendToWindow(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed() && rendererReady) {
@@ -41,29 +57,23 @@ function sendToWindow(channel, payload) {
 }
 
 function flushPendingEvents() {
-  while (pendingEvents.length > 0) {
+  while (pendingEvents.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
     const { channel, payload } = pendingEvents.shift();
     mainWindow.webContents.send(channel, payload);
   }
 }
 
-function showWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    createWindow();
-    return;
-  }
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
-}
+// ---- The window --------------------------------------------------------------------------------------------------
 
-function createWindow() {
+function createWindow({ visible }) {
   rendererReady = false;
+  showOnReady = visible;
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 860,
     minWidth: 640,
     minHeight: 520,
+    show: false, // shown when ready (or kept hidden for a start with Windows)
     title: 'Daily Planner',
     icon: ICON,
     backgroundColor: '#f4f6f9',
@@ -77,9 +87,29 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
+  mainWindow.once('ready-to-show', () => {
+    if (showOnReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
+
   // The window only ever shows our own page.
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
+
+  // Closing or minimizing hides the window to the tray instead of ending the app.
+  mainWindow.on('close', (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    hideToTray(true);
+  });
+  mainWindow.on('minimize', (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    hideToTray(false);
+  });
+  // Windows is shutting down or logging off: never get in its way.
+  mainWindow.on('session-end', () => {
+    quitting = true;
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -87,7 +117,85 @@ function createWindow() {
   });
 }
 
-// ---- Notification buttons and links --------------------------------------------------------------------------
+function showWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow({ visible: true });
+    return;
+  }
+  showOnReady = true;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function hideWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+}
+
+function hideToTray(announce) {
+  hideWindow();
+  if (announce) announceBackgroundRunning().catch((error) => log('Message failed:', error));
+}
+
+// The first time the window is closed: "still running in the background", with "Don't show again".
+async function announceBackgroundRunning() {
+  const settings = service.getSettings();
+  if (!settings.showBackgroundMessage || settings.backgroundMessageShown) return;
+  service.saveSettings({ backgroundMessageShown: true });
+  const result = await dialog.showMessageBox({
+    type: 'info',
+    title: 'Daily Planner',
+    message: 'Daily Planner is still running in the background.',
+    detail:
+      'It stays in the system tray (the icons near the clock) so your reminders keep working. ' +
+      'To close it completely, right-click its tray icon and choose Exit.',
+    buttons: ['OK'],
+    defaultId: 0,
+    noLink: true,
+    checkboxLabel: "Don't show this again",
+    checkboxChecked: false,
+  });
+  if (result.checkboxChecked) service.saveSettings({ showBackgroundMessage: false });
+}
+
+// ---- Exit ---------------------------------------------------------------------------------------------------------------
+
+async function confirmExit() {
+  const result = await dialog.showMessageBox({
+    type: 'question',
+    title: 'Exit Daily Planner',
+    message: 'Exit Daily Planner?',
+    detail: 'Reminders and notifications will stop until you start Daily Planner again.',
+    buttons: ['Exit', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (result.response === 0) {
+    quitting = true;
+    app.quit();
+  }
+}
+
+// ---- Tray ----------------------------------------------------------------------------------------------------------------
+
+// To add a tray menu item later, add one line here.
+function trayActions() {
+  return [
+    { id: 'open', label: 'Open / Show', click: showWindow },
+    { id: 'hide', label: 'Hide / Minimize', click: hideWindow },
+    { id: 'exit', label: 'Exit', separatorBefore: true, click: confirmExit },
+  ];
+}
+
+function startTray() {
+  trayController = createTray(
+    { Tray, Menu, nativeImage },
+    { iconPath: ICON, tooltip: 'Daily Planner', actions: trayActions(), onOpen: showWindow }
+  );
+}
+
+// ---- Notification buttons and links ---------------------------------------------------------------------------------------
 
 // action: { type: 'snooze' | 'done' | 'open' | 'missed', taskId, dateKey }
 function handleAction(action) {
@@ -107,7 +215,7 @@ function handleAction(action) {
   }
 }
 
-// ---- Reminder engine --------------------------------------------------------------------------------------------
+// ---- Reminder engine ---------------------------------------------------------------------------------------------------------
 
 function startEngine() {
   notify = createElectronNotifier({ Notification, onError: (error) => log('Notification failed:', error) });
@@ -135,7 +243,38 @@ function startEngine() {
   engine.start();
 }
 
-// ---- Start-up -------------------------------------------------------------------------------------------------------
+// After wake from sleep, unlock, or a clock / time zone change: recalculate and check at once.
+function onSystemChange() {
+  if (engine) engine.onSystemChange();
+  sendToWindow('data-changed');
+}
+
+function startSystemWatch() {
+  powerMonitor.on('resume', onSystemChange);
+  powerMonitor.on('unlock-screen', onSystemChange);
+
+  // A change of the PC's time zone (or a daylight saving change) changes the UTC offset.
+  lastOffset = new Date().getTimezoneOffset();
+  watchdog = setInterval(() => {
+    const offset = new Date().getTimezoneOffset();
+    if (offset !== lastOffset) {
+      lastOffset = offset;
+      onSystemChange();
+    }
+  }, WATCHDOG_MS);
+  if (watchdog && typeof watchdog.unref === 'function') watchdog.unref();
+}
+
+// ---- Start with Windows ---------------------------------------------------------------------------------------------------------
+
+function applyStartWithWindows(settings) {
+  if (!app.isPackaged) return; // never register the development program
+  if (lastLoginSetting === settings.startWithWindows) return;
+  lastLoginSetting = settings.startWithWindows;
+  app.setLoginItemSettings({ openAtLogin: settings.startWithWindows, args: [STARTUP_ARG] });
+}
+
+// ---- Window <-> service connection -----------------------------------------------------------------------------------------------
 
 function registerIpc() {
   ipcMain.handle('svc', async (event, method, args) => {
@@ -172,11 +311,13 @@ function registerIpc() {
   });
 }
 
+// ---- Start-up -------------------------------------------------------------------------------------------------------------------------
+
 function start() {
   app.setAppUserModelId(APP_ID);
 
-  // Only one copy runs. A second launch (for example from a notification button) is handed
-  // to the running copy through the "second-instance" event.
+  // Only one copy runs. A second launch (a double-click on the shortcut, or a notification
+  // button) is handed to the running copy through the "second-instance" event.
   if (!app.requestSingleInstanceLock()) {
     app.quit();
     return;
@@ -192,26 +333,37 @@ function start() {
     service = new PlannerService({
       store,
       onDataChanged: () => sendToWindow('data-changed'),
+      onSettingsChanged: applyStartWithWindows,
     });
     registerIpc();
     if (app.isPackaged) app.setAsDefaultProtocolClient(PROTOCOL);
+    applyStartWithWindows(service.getSettings());
 
     startEngine();
-    createWindow();
+    startTray();
+    startSystemWatch();
+
+    // Started by Windows at login: stay hidden in the tray.
+    const startedHidden = process.argv.includes(STARTUP_ARG);
+    createWindow({ visible: !startedHidden });
 
     const launchAction = findActionUrlInArgv(process.argv);
     if (launchAction) handleAction(launchAction);
-
-    app.on('activate', showWindow);
   });
 
-  // Milestone 4: closing the window quits the app. (Milestone 5 changes this to "keep running in the tray".)
-  app.on('window-all-closed', () => app.quit());
+  // The app keeps running when there are no windows: it lives in the tray.
+  app.on('window-all-closed', () => {});
+
   app.on('before-quit', () => {
+    quitting = true;
+    if (watchdog) clearInterval(watchdog);
     if (engine) engine.stop();
+  });
+  app.on('will-quit', () => {
+    if (trayController) trayController.destroy();
   });
 }
 
 start();
 
-module.exports = { handleAction };
+module.exports = { handleAction, getEngine: () => engine };

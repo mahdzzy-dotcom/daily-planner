@@ -31,6 +31,10 @@ async function shot(page, name) {
   }
 }
 
+// A task row, found by its exact title (not by words that happen to appear in another row's tags).
+const taskRow = (page, title) =>
+  page.locator('.task').filter({ has: page.locator('.task-title', { hasText: new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }) });
+
 const rowTexts = (page, zone) => page.$$eval(`.zone.z${zone} .task .task-title`, (els) => els.map((e) => e.textContent));
 const figure = (page, zone, label) =>
   page.$eval(`.zone.z${zone} .zone-figures`, (el, l) => {
@@ -74,13 +78,13 @@ async function setTime(page, hour, minute, ampm) {
   });
   await step('rows show time, title, duration, indicators; after-midnight task has a "next day" label', async () => {
     assert.deepEqual(await rowTexts(page, 1), ['Morning Routine', 'Study SQL', 'Exercise', 'Long call with the team', 'Review notes']);
-    const study = page.locator('.task', { hasText: 'Study SQL' });
+    const study = taskRow(page, 'Study SQL');
     assert.match(await study.textContent(), /8:00 AM/);
     assert.match(await study.textContent(), /1h 30m/);
     assert.match(await study.textContent(), /Repeats/);
     assert.match(await study.textContent(), /Reminder/);
     assert.match(await study.textContent(), /Not done/);
-    assert.match(await page.locator('.task', { hasText: 'Night reading' }).textContent(), /next day/);
+    assert.match(await taskRow(page, 'Night reading').textContent(), /next day/);
     assert.match(await page.locator('.zone.z2 .continues').first().textContent(), /Continues from/);
     assert.equal((await page.$$('.task .tag.warn')).length, 2, 'two overlapping tasks are flagged');
   });
@@ -136,7 +140,7 @@ async function setTime(page, hour, minute, ampm) {
     assert.equal(await page.textContent('.readout.zone-readout'), 'Asr → Maghrib');
     await page.click('.dialog-footer .btn.primary');
     await page.waitForSelector('.dialog', { state: 'detached' });
-    const row = page.locator('.task', { hasText: 'Before Maghrib walk' });
+    const row = taskRow(page, 'Before Maghrib walk');
     assert.match(await row.textContent(), /5:15 PM/);
   });
   await step('a 2:00 AM task entered on Oct 5 shows the Planning Day note and lands in Zone 5 of Oct 4', async () => {
@@ -144,8 +148,8 @@ async function setTime(page, hour, minute, ampm) {
     await page.fill('#f-title', 'Tahajjud');
     await setTime(page, 2, 0, 'AM');
     await page.fill('#f-date', '2026-10-05');
-    await page.waitForSelector('.note:not([hidden])');
-    assert.equal(await page.textContent('.note'), 'Will appear under Planning Day: Oct 4 → Oct 5, Zone: Isha → Fajr');
+    await page.waitForSelector('.note.placement:not([hidden])');
+    assert.equal(await page.textContent('.note.placement'), 'Will appear under Planning Day: Oct 4 → Oct 5, Zone: Isha → Fajr');
     await shot(page, 'form-after-midnight');
     await page.click('.dialog-footer .btn.primary');
     await page.waitForSelector('.dialog', { state: 'detached' });
@@ -197,15 +201,108 @@ async function setTime(page, hour, minute, ampm) {
     await page.keyboard.press('Escape');
   });
 
+  console.log('Tasks relative to tasks');
+  await step('"Relative to Task": pick a task, minutes, before/after, start/end - the start time updates live', async () => {
+    await page.click('#add-btn');
+    await page.fill('#f-title', 'Warm-up');
+    await page.click('button:text-is("Relative to Task")');
+    await page.selectOption('select[aria-label="Task to follow"]', { label: 'Study SQL (8:00 AM, 1h 30m, repeats)' });
+    await page.fill('input[aria-label="Minutes"]', '15');
+    const startText = () => page.$$eval('.readout', (els) => els[0].textContent);
+    await page.waitForFunction(() => document.querySelectorAll('.readout')[0].textContent === '9:45 AM');
+    assert.equal(await page.textContent('.readout.zone-readout'), 'Fajr → Dhuhr');
+    await page.selectOption('select[aria-label="Start or end of that task"]', 'start');
+    await page.waitForFunction(() => document.querySelectorAll('.readout')[0].textContent === '8:15 AM');
+    await page.selectOption('select[aria-label="Before or after"]', 'before');
+    await page.waitForFunction(() => document.querySelectorAll('.readout')[0].textContent === '7:45 AM');
+    await page.selectOption('select[aria-label="Start or end of that task"]', 'end');
+    await page.selectOption('select[aria-label="Before or after"]', 'after');
+    await page.waitForFunction(() => document.querySelectorAll('.readout')[0].textContent === '9:45 AM');
+    assert.equal(await startText(), '9:45 AM');
+    assert.equal(await page.isHidden('.note.start-warning'), true, 'no warning when the other task is on that day');
+    await shot(page, 'form-relative-task');
+    await page.click('.dialog-footer .btn.primary');
+    await page.waitForSelector('.dialog', { state: 'detached' });
+    const row = taskRow(page, 'Warm-up');
+    assert.match(await row.textContent(), /9:45 AM/);
+    assert.match(await row.textContent(), /Follows “Study SQL”/);
+  });
+  await step('when the other task is not on that day, a warning and the backup time are shown', async () => {
+    await page.click('#add-btn');
+    await page.fill('#f-title', 'Gym buddy');
+    await page.click('button:text-is("Relative to Task")');
+    await page.selectOption('select[aria-label="Task to follow"]', { label: 'Gym (6:30 PM, 1h 0m, repeats)' });
+    await page.waitForSelector('.note.start-warning:not([hidden])');
+    assert.match(await page.textContent('.note.start-warning'), /not on this day/);
+    await page.waitForFunction(() => document.querySelectorAll('.readout')[0].textContent === '9:00 AM');
+    await setTime(page, 3, 0, 'PM');
+    await page.waitForFunction(() => document.querySelectorAll('.readout')[0].textContent === '3:00 PM');
+    await shot(page, 'form-backup-warning');
+    await page.click('.dialog-footer .btn.primary');
+    await page.waitForSelector('.dialog', { state: 'detached' });
+    const row = taskRow(page, 'Gym buddy');
+    assert.match(await row.textContent(), /3:00 PM/);
+    assert.match(await row.textContent(), /Backup start time/);
+  });
+  await step('a task cannot be offered itself, and a missing choice is reported', async () => {
+    await taskRow(page, 'Warm-up').click();
+    await page.waitForSelector('.dialog');
+    const options = await page.$$eval('select[aria-label="Task to follow"] option', (els) => els.map((e) => e.textContent));
+    assert.ok(options.some((o) => o.startsWith('Study SQL')));
+    assert.ok(!options.some((o) => o.startsWith('Warm-up')), 'not itself');
+    await page.selectOption('select[aria-label="Task to follow"]', '');
+    await page.click('.dialog-footer .btn.primary');
+    await page.waitForSelector('.errors:not([hidden])');
+    assert.match(await page.textContent('.errors'), /Choose the task/);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.dialog', { state: 'detached' });
+  });
+  await step('deleting a task that others follow warns, and the followers keep their times', async () => {
+    await page.click('#add-btn');
+    await page.fill('#f-title', 'Breakfast');
+    await setTime(page, 6, 0, 'AM');
+    await page.click('.dialog-footer .btn.primary');
+    await page.waitForSelector('.dialog', { state: 'detached' });
+
+    await page.click('#add-btn');
+    await page.fill('#f-title', 'Walk');
+    await page.click('button:text-is("Relative to Task")');
+    await page.selectOption('select[aria-label="Task to follow"]', { label: 'Breakfast (6:00 AM, 30m)' });
+    await page.fill('input[aria-label="Minutes"]', '10');
+    await page.waitForFunction(() => document.querySelectorAll('.readout')[0].textContent === '6:40 AM');
+    await page.click('.dialog-footer .btn.primary');
+    await page.waitForSelector('.dialog', { state: 'detached' });
+
+    await taskRow(page, 'Breakfast').click();
+    await page.click('.dialog-footer .btn.danger');
+    await page.waitForSelector('text=Other tasks follow this task');
+    assert.match(await page.textContent('.overlay:last-child .dialog-message'), /“Walk”/);
+    await shot(page, 'delete-warning');
+    await page.click('.overlay:last-child .btn:text-is("Cancel")');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.overlay', { state: 'detached' });
+    assert.ok((await rowTexts(page, 1)).includes('Breakfast'), 'cancel keeps it');
+
+    await taskRow(page, 'Breakfast').click();
+    await page.click('.dialog-footer .btn.danger');
+    await page.waitForSelector('text=Other tasks follow this task');
+    await page.click('.overlay:last-child .btn.danger');
+    await page.waitForSelector('.overlay', { state: 'detached' });
+    assert.ok(!(await rowTexts(page, 1)).includes('Breakfast'));
+    const walk = taskRow(page, 'Walk');
+    assert.match(await walk.textContent(), /6:40 AM/);
+    assert.ok(!/Follows/.test(await walk.textContent()), 'it is a fixed time now');
+  });
+
   console.log('Editing');
   await step('toggling done from the row', async () => {
-    const row = page.locator('.task', { hasText: 'Exercise' });
+    const row = taskRow(page, 'Exercise');
     await row.locator('.check').click();
     await page.waitForSelector('.task.done:has-text("Exercise")');
     assert.equal(await row.locator('.check.on').count(), 1);
   });
   await step('edit a one-off task', async () => {
-    await page.locator('.task', { hasText: 'Dentist' }).click();
+    await taskRow(page, 'Dentist').click();
     await page.waitForSelector('.dialog');
     assert.equal(await page.inputValue('#f-title'), 'Dentist');
     await page.fill('#f-title', 'Dentist (moved)');
@@ -214,7 +311,7 @@ async function setTime(page, hour, minute, ampm) {
     assert.ok((await rowTexts(page, 3)).includes('Dentist (moved)'));
   });
   await step('editing one repeating occurrence: scope chooser, "This occurrence only"', async () => {
-    await page.locator('.task', { hasText: 'Study SQL' }).click();
+    await taskRow(page, 'Study SQL').click();
     await page.waitForSelector('.dialog');
     await page.fill('#f-title', 'Study SQL (today)');
     await page.click('.dialog-footer .btn.primary');
@@ -230,7 +327,7 @@ async function setTime(page, hour, minute, ampm) {
     await page.click('button:text-is("Today")');
   });
   await step('changing the repeat pattern disables "This occurrence only"', async () => {
-    await page.locator('.task', { hasText: 'Class' }).first().click();
+    await taskRow(page, 'Class').first().click();
     await page.waitForSelector('.dialog');
     await page.fill('input[aria-label="Repeat every"]', '3');
     await page.click('.dialog-footer .btn.primary');
@@ -241,7 +338,7 @@ async function setTime(page, hour, minute, ampm) {
     await page.keyboard.press('Escape');
   });
   await step('deleting a repeating task asks for scope; deleting a one-off asks to confirm', async () => {
-    await page.locator('.task', { hasText: 'Class' }).first().click();
+    await taskRow(page, 'Class').first().click();
     await page.click('.dialog-footer .btn.danger');
     await page.waitForSelector('text=Delete which occurrences');
     await page.click('input[name="scope"] >> nth=2');
@@ -249,7 +346,7 @@ async function setTime(page, hour, minute, ampm) {
     await page.waitForSelector('.overlay', { state: 'detached' });
     assert.ok(!(await page.textContent('#view')).includes('Class'));
 
-    await page.locator('.task', { hasText: 'Tahajjud' }).click();
+    await taskRow(page, 'Tahajjud').click();
     await page.click('.dialog-footer .btn.danger');
     await page.waitForSelector('text=Delete "Tahajjud"?');
     await page.click('.overlay:last-child .btn.danger');
@@ -257,7 +354,7 @@ async function setTime(page, hour, minute, ampm) {
     assert.ok(!(await page.textContent('#view')).includes('Tahajjud'));
   });
   await step('duplicate', async () => {
-    await page.locator('.task', { hasText: 'Exercise' }).click();
+    await taskRow(page, 'Exercise').click();
     await page.click('.dialog-footer .btn:text-is("Duplicate")');
     await page.waitForSelector('.dialog', { state: 'detached' });
     assert.ok((await rowTexts(page, 1)).includes('Exercise (copy)'));

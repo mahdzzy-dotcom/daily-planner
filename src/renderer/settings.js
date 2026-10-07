@@ -151,7 +151,7 @@
       section('Application',
         h('div', { class: 'settings-grid' },
           row('Start with Windows', toggle('Start Daily Planner when Windows starts (in the tray)', s.startWithWindows, (v) => save({ startWithWindows: v }))),
-          row('Background message', toggle('Show the "still running in the background" message when closing', s.showBackgroundMessage, (v) => save({ showBackgroundMessage: v }))),
+          row('Background message', toggle('Show the "still running in the background" message', s.showBackgroundMessage, (v) => save({ showBackgroundMessage: v }), 'Shown once, the next time the window is closed. Closing the window keeps Daily Planner running in the tray so reminders keep working.')),
           row('Theme', theme),
           row('Working days', h('div', {}, workingDays, h('p', { class: 'hint', text: 'Used by "last working day" repeat rules.' }))))),
 

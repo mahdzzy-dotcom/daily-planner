@@ -44,8 +44,13 @@ Export / Import (Settings -> Data) uses one JSON file. Version 1:
 }
 ```
 
-- `start`: `{ "mode": "fixed", "time": "HH:MM" }` (24-hour) or
-  `{ "mode": "prayer", "prayer": "fajr|dhuhr|asr|maghrib|isha", "direction": "before|after", "minutes": 10 }`.
+- `start`: `{ "mode": "fixed", "time": "HH:MM" }` (24-hour),
+  `{ "mode": "prayer", "prayer": "fajr|dhuhr|asr|maghrib|isha", "direction": "before|after", "minutes": 10 }`, or
+  `{ "mode": "task", "taskId": "...", "point": "start|end", "direction": "before|after", "minutes": 15, "fallbackTime": "HH:MM" }`
+  (starts relative to another task's start or end on the same date; `fallbackTime` is used, with a warning,
+  on days when that task has no occurrence).
+- `continuedFrom` (optional): the id of the task this one was split from by a "This and following" edit.
+  Tasks that follow the original keep following the later part through this link.
 - `date`: the calendar date of the start time for one-off tasks; `null` for repeating tasks.
 - `recurrence`: `null` for one-off tasks. `frequency` is `daily`, `weekly`, `monthly` or `yearly`; see
   `src/core/recurrence.js` for every field (weekday lists, monthly modes, yearly modes, end rules).

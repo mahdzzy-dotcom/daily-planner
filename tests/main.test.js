@@ -1,8 +1,8 @@
 'use strict';
 
 // Checks the Electron main process wiring without Electron: a stand-in "electron" (and a stand-in
-// prayer library) are supplied, so window creation, saved data, IPC, export/import and the
-// notification-button links can all be exercised here.
+// prayer library) are supplied, so window, tray, background running, start with Windows, saved data,
+// IPC, export/import and the notification-button links can all be exercised here.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -11,11 +11,13 @@ const os = require('os');
 const path = require('path');
 const Module = require('module');
 
+const { at } = require('./helpers');
+
 const MAIN_PATH = require.resolve('../src/main/main.js');
 
 // ---- Stand-ins ------------------------------------------------------------------------------------------
 
-function makeFakeElectron({ userData, lock = true, saveTo, openFrom }) {
+function makeFakeElectron({ userData, lock = true, saveTo, openFrom, packaged = false }) {
   const fake = {
     appId: null,
     quitCalled: false,
@@ -24,11 +26,16 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom }) {
     ipcOn: {},
     windows: [],
     notifications: [],
+    trays: [],
+    messageBoxes: [],
+    nextBox: { response: 0, checkboxChecked: false },
+    loginSettings: [],
+    powerEvents: {},
     dialogs: { saveTo, openFrom },
   };
 
   fake.app = {
-    isPackaged: false,
+    isPackaged: packaged,
     setAppUserModelId: (id) => { fake.appId = id; },
     requestSingleInstanceLock: () => lock,
     quit: () => { fake.quitCalled = true; },
@@ -36,14 +43,17 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom }) {
     whenReady: () => Promise.resolve(),
     getPath: () => userData,
     setAsDefaultProtocolClient: () => {},
+    setLoginItemSettings: (settings) => fake.loginSettings.push(settings),
   };
 
   fake.BrowserWindow = class {
     constructor(options) {
       this.options = options;
       this.sent = [];
-      this.shown = 0;
       this.handlers = {};
+      this.visible = false;
+      this.shownCount = 0;
+      this.hiddenCount = 0;
       this.webContents = {
         send: (channel, payload) => this.sent.push([channel, payload]),
         setWindowOpenHandler: () => {},
@@ -53,13 +63,33 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom }) {
     }
     setMenuBarVisibility() {}
     loadFile(file) { this.file = file; }
-    on(event, fn) { this.handlers[event] = fn; }
+    on(event, fn) { (this.handlers[event] = this.handlers[event] || []).push(fn); }
+    once(event, fn) { this.on(event, fn); }
+    // Pretend Windows/Electron raised an event. Returns an event object that records preventDefault().
+    emit(event) {
+      const e = { prevented: false, preventDefault() { this.prevented = true; } };
+      (this.handlers[event] || []).forEach((fn) => fn(e));
+      return e;
+    }
     isDestroyed() { return false; }
     isMinimized() { return false; }
     restore() {}
-    show() { this.shown += 1; }
+    show() { this.visible = true; this.shownCount += 1; }
+    hide() { this.visible = false; this.hiddenCount += 1; }
     focus() {}
   };
+
+  fake.Tray = class {
+    constructor(image) { this.image = image; this.handlers = {}; this.destroyed = false; fake.trays.push(this); }
+    setToolTip(text) { this.tooltip = text; }
+    setContextMenu(menu) { this.menu = menu; }
+    on(event, fn) { this.handlers[event] = fn; }
+    destroy() { this.destroyed = true; }
+    isDestroyed() { return this.destroyed; }
+  };
+  fake.Menu = { buildFromTemplate: (template) => ({ template }) };
+  fake.nativeImage = { createFromPath: (p) => ({ path: p, resize: (size) => ({ path: p, size }) }) };
+  fake.powerMonitor = { on: (event, fn) => { fake.powerEvents[event] = fn; } };
 
   fake.ipcMain = {
     handle: (channel, fn) => { fake.ipc[channel] = fn; },
@@ -69,6 +99,10 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom }) {
   fake.dialog = {
     showSaveDialog: async () => (fake.dialogs.saveTo ? { canceled: false, filePath: fake.dialogs.saveTo } : { canceled: true }),
     showOpenDialog: async () => (fake.dialogs.openFrom ? { canceled: false, filePaths: [fake.dialogs.openFrom] } : { canceled: true }),
+    showMessageBox: async (options) => {
+      fake.messageBoxes.push(options);
+      return fake.nextBox;
+    },
   };
 
   fake.Notification = class {
@@ -84,12 +118,12 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom }) {
 function makeFakeAdhan() {
   class PrayerTimes {
     constructor(coordinates, date) {
-      const at = (h, m) => new Date(date.getFullYear(), date.getMonth(), date.getDate(), h, m, 0, 0);
-      this.fajr = at(5, 5);
-      this.dhuhr = at(11, 48);
-      this.asr = at(15, 14);
-      this.maghrib = at(18, 0);
-      this.isha = at(19, 20);
+      const time = (h, m) => new Date(date.getFullYear(), date.getMonth(), date.getDate(), h, m, 0, 0);
+      this.fajr = time(5, 5);
+      this.dhuhr = time(11, 48);
+      this.asr = time(15, 14);
+      this.maghrib = time(18, 0);
+      this.isha = time(19, 20);
     }
   }
   const method = () => ({ adjustments: { fajr: 0, sunrise: 0, dhuhr: 0, asr: 0, maghrib: 0, isha: 0 }, madhab: null });
@@ -119,12 +153,20 @@ async function launch(options = {}) {
   const fake = makeFakeElectron({ userData, ...options });
   stand.electron = fake;
   delete require.cache[MAIN_PATH];
-  const mainModule = require(MAIN_PATH);
-  await new Promise((resolve) => setImmediate(resolve)); // let app.whenReady().then(...) run
+  if (options.hidden) process.argv.push('--hidden');
+  let mainModule;
+  try {
+    mainModule = require(MAIN_PATH);
+    await new Promise((resolve) => setImmediate(resolve)); // let app.whenReady().then(...) run
+  } finally {
+    if (options.hidden) process.argv.pop();
+  }
   fake.userData = userData;
   fake.main = mainModule;
+  fake.win = () => fake.windows[fake.windows.length - 1];
   fake.svc = (method, ...args) => fake.ipc.svc({}, method, args);
   fake.dataFile = () => JSON.parse(fs.readFileSync(path.join(userData, 'data.json'), 'utf8'));
+  fake.settleDialogs = () => new Promise((resolve) => setImmediate(resolve));
   fake.cleanup = () => {
     // stop the reminder engine's timer, otherwise the test process would never finish
     if (fake.appEvents['before-quit']) fake.appEvents['before-quit'][0]();
@@ -140,23 +182,287 @@ function form(extra = {}) {
   };
 }
 
-// ---- Tests ----------------------------------------------------------------------------------------------
+const trayItem = (app, label) => app.trays[0].menu.template.find((item) => item.label === label);
 
-test('Start-up: app id, one secure window showing our page', async () => {
+// ---- Start-up -----------------------------------------------------------------------------------------------
+
+test('Start-up: app id, one secure window showing our page, shown when ready', async () => {
   const app = await launch();
   assert.equal(app.appId, 'com.dailyplanner.app');
   assert.equal(app.windows.length, 1);
-  const win = app.windows[0];
+  const win = app.win();
+  assert.equal(win.options.show, false, 'created hidden, shown once ready (no white flash)');
   assert.equal(win.options.webPreferences.contextIsolation, true);
   assert.equal(win.options.webPreferences.nodeIntegration, false);
   assert.equal(win.options.webPreferences.sandbox, true);
-  assert.ok(win.file.endsWith(path.join('renderer', 'index.html')));
   assert.ok(fs.existsSync(win.file), 'the page exists');
   assert.ok(fs.existsSync(win.options.webPreferences.preload), 'the preload script exists');
   assert.ok(fs.existsSync(win.options.icon), 'the icon exists');
-  assert.equal(app.appEvents['window-all-closed'].length, 1);
+  assert.equal(win.visible, false);
+  win.emit('ready-to-show');
+  assert.equal(win.visible, true);
   app.cleanup();
 });
+
+test('22. Started by Windows at login (--hidden): stays hidden in the tray', async () => {
+  const app = await launch({ hidden: true });
+  const win = app.win();
+  win.emit('ready-to-show');
+  assert.equal(win.visible, false, 'the window does not pop up');
+  assert.equal(app.trays.length, 1, 'but the tray icon is there');
+  assert.ok(app.main.getEngine(), 'and the reminder engine is running');
+  trayItem(app, 'Open / Show').click();
+  assert.equal(win.visible, true, 'it opens from the tray');
+  app.cleanup();
+});
+
+test('22b. "Start with Windows" registers the app to start at login, hidden in the tray', async () => {
+  const app = await launch({ packaged: true });
+  assert.deepEqual(app.loginSettings.pop(), { openAtLogin: false, args: ['--hidden'] });
+  await app.svc('saveSettings', { startWithWindows: true });
+  assert.deepEqual(app.loginSettings.pop(), { openAtLogin: true, args: ['--hidden'] });
+  await app.svc('saveSettings', { theme: 'dark' });
+  assert.equal(app.loginSettings.length, 0, 'unrelated changes do not touch the registration');
+  await app.svc('saveSettings', { startWithWindows: false });
+  assert.deepEqual(app.loginSettings.pop(), { openAtLogin: false, args: ['--hidden'] });
+  app.cleanup();
+});
+
+test('22c. A development run never registers itself with Windows', async () => {
+  const app = await launch({ packaged: false });
+  await app.svc('saveSettings', { startWithWindows: true });
+  assert.equal(app.loginSettings.length, 0);
+  app.cleanup();
+});
+
+// ---- Closing, minimizing, the tray ------------------------------------------------------------------------------
+
+test('Closing the window hides it to the tray; the app keeps running', async () => {
+  const app = await launch();
+  const win = app.win();
+  win.emit('ready-to-show');
+  const event = win.emit('close');
+  assert.equal(event.prevented, true, 'the window is not destroyed');
+  assert.equal(win.visible, false);
+  assert.equal(app.quitCalled, false);
+  assert.equal(app.trays[0].destroyed, false);
+  app.appEvents['window-all-closed'][0](); // the app does not quit when there are no windows
+  assert.equal(app.quitCalled, false);
+  app.cleanup();
+});
+
+test('Minimizing hides to the tray without any message', async () => {
+  const app = await launch();
+  const win = app.win();
+  win.emit('ready-to-show');
+  const event = win.emit('minimize');
+  assert.equal(event.prevented, true);
+  assert.equal(win.visible, false);
+  await app.settleDialogs();
+  assert.equal(app.messageBoxes.length, 0);
+  app.cleanup();
+});
+
+test('First close: "still running in the background" message, once', async () => {
+  const app = await launch();
+  const win = app.win();
+  win.emit('ready-to-show');
+  win.emit('close');
+  await app.settleDialogs();
+  assert.equal(app.messageBoxes.length, 1);
+  const box = app.messageBoxes[0];
+  assert.match(box.message, /still running in the background/);
+  assert.match(box.detail, /Exit/);
+  assert.equal(box.checkboxLabel, "Don't show this again");
+  assert.equal(app.dataFile().settings.backgroundMessageShown, true);
+  assert.equal(app.dataFile().settings.showBackgroundMessage, true, 'not switched off unless the user asks');
+
+  trayItem(app, 'Open / Show').click();
+  win.emit('close');
+  await app.settleDialogs();
+  assert.equal(app.messageBoxes.length, 1, 'not shown a second time');
+  app.cleanup();
+});
+
+test('"Don\'t show again" turns the message off; Settings can turn it back on', async () => {
+  const app = await launch();
+  app.nextBox = { response: 0, checkboxChecked: true };
+  const win = app.win();
+  win.emit('close');
+  await app.settleDialogs();
+  assert.equal(app.dataFile().settings.showBackgroundMessage, false);
+
+  await app.svc('saveSettings', { showBackgroundMessage: true });
+  assert.equal(app.dataFile().settings.backgroundMessageShown, false, 'will be shown at the next close');
+  app.nextBox = { response: 0, checkboxChecked: false };
+  win.emit('close');
+  await app.settleDialogs();
+  assert.equal(app.messageBoxes.length, 2);
+  app.cleanup();
+});
+
+test('Tray: tooltip, icon, and the Open / Hide / Exit menu', async () => {
+  const app = await launch();
+  const tray = app.trays[0];
+  assert.equal(tray.tooltip, 'Daily Planner');
+  assert.ok(tray.image.path.endsWith('icon.png'));
+  assert.deepEqual(tray.image.size, { width: 16, height: 16 });
+  assert.deepEqual(tray.menu.template.map((i) => i.label || i.type), ['Open / Show', 'Hide / Minimize', 'separator', 'Exit']);
+
+  const win = app.win();
+  win.emit('ready-to-show');
+  trayItem(app, 'Hide / Minimize').click();
+  assert.equal(win.visible, false);
+  tray.handlers['double-click']();
+  assert.equal(win.visible, true, 'double-click opens the window');
+  trayItem(app, 'Hide / Minimize').click();
+  tray.handlers.click();
+  assert.equal(win.visible, true, 'a single click opens it too');
+  app.cleanup();
+});
+
+test('Opening from the tray after the window was destroyed creates a new window', async () => {
+  const app = await launch();
+  const first = app.win();
+  first.emit('closed');
+  trayItem(app, 'Open / Show').click();
+  assert.equal(app.windows.length, 2);
+  app.win().emit('ready-to-show');
+  assert.equal(app.win().visible, true);
+  app.cleanup();
+});
+
+test('Exit asks for confirmation; Cancel keeps running; Exit really quits', async () => {
+  const app = await launch();
+  const win = app.win();
+  win.emit('ready-to-show');
+
+  app.nextBox = { response: 1 }; // Cancel
+  await trayItem(app, 'Exit').click();
+  assert.equal(app.quitCalled, false);
+  const box = app.messageBoxes[0];
+  assert.match(box.message, /Exit Daily Planner/);
+  assert.match(box.detail, /Reminders and notifications will stop/);
+  assert.deepEqual(box.buttons, ['Exit', 'Cancel']);
+  assert.equal(win.emit('close').prevented, true, 'still hides instead of closing');
+
+  app.nextBox = { response: 0 }; // Exit
+  await trayItem(app, 'Exit').click();
+  assert.equal(app.quitCalled, true);
+  assert.equal(win.emit('close').prevented, false, 'now the window is allowed to close');
+  app.appEvents['will-quit'][0]();
+  assert.equal(app.trays[0].destroyed, true, 'the tray icon is removed');
+  app.cleanup();
+});
+
+test('Windows shutting down or logging off is never blocked', async () => {
+  const app = await launch();
+  const win = app.win();
+  win.emit('session-end');
+  assert.equal(win.emit('close').prevented, false);
+  app.cleanup();
+});
+
+// ---- Single instance, links ---------------------------------------------------------------------------------------------
+
+test('21. A second copy quits immediately; the first brings its (hidden) window forward', async () => {
+  const second = await launch({ lock: false });
+  assert.equal(second.quitCalled, true);
+  assert.equal(second.windows.length, 0);
+  assert.equal(second.trays.length, 0);
+  second.cleanup();
+
+  const first = await launch();
+  const win = first.win();
+  win.emit('ready-to-show');
+  trayItem(first, 'Hide / Minimize').click();
+  assert.equal(win.visible, false);
+  first.appEvents['second-instance'][0]({}, ['Daily Planner.exe']);
+  assert.equal(win.visible, true, 'the existing window is shown');
+  assert.equal(first.windows.length, 1, 'no second window');
+  first.cleanup();
+});
+
+test('Notification buttons: Mark as Done and Snooze act quietly, without showing the window', async () => {
+  const app = await launch();
+  const { taskId } = await app.svc('saveTask', { mode: 'create', form: form() });
+  const win = app.win();
+  win.emit('ready-to-show');
+  trayItem(app, 'Hide / Minimize').click();
+  const shownBefore = win.shownCount;
+
+  app.appEvents['second-instance'][0]({}, ['Daily Planner.exe', `dailyplanner://snooze?task=${taskId}&date=2030-01-10`]);
+  assert.equal(app.dataFile().reminderState.snoozed.length, 1);
+
+  app.appEvents['second-instance'][0]({}, ['Daily Planner.exe', `dailyplanner://done?task=${taskId}&date=2030-01-10`]);
+  const saved = app.dataFile();
+  assert.equal(saved.tasks[0].completions['2030-01-10'], true);
+  assert.equal(saved.reminderState.snoozed.length, 0, 'done cancels the snooze');
+  assert.equal(win.shownCount, shownBefore, 'the window was not brought up');
+  app.cleanup();
+});
+
+test('Clicking a notification opens the window on that task', async () => {
+  const app = await launch();
+  const { taskId } = await app.svc('saveTask', { mode: 'create', form: form() });
+  const win = app.win();
+  win.emit('ready-to-show');
+  trayItem(app, 'Hide / Minimize').click();
+
+  // The window page is not ready yet: the request waits
+  app.appEvents['second-instance'][0]({}, ['x.exe', `dailyplanner://open?task=${taskId}&date=2030-01-10`]);
+  assert.equal(win.visible, true);
+  assert.ok(!win.sent.some(([c]) => c === 'open-task'));
+
+  app.ipcOn['renderer-ready']();
+  assert.deepEqual(win.sent.find(([c]) => c === 'open-task')[1], { taskId, dateKey: '2030-01-10' });
+  app.cleanup();
+});
+
+// ---- Reminders keep working in the background ---------------------------------------------------------------------------
+
+test('19. With the window hidden in the tray, reminders still produce Windows notifications', async () => {
+  const app = await launch();
+  const win = app.win();
+  win.emit('ready-to-show');
+  win.emit('close'); // hidden in the tray
+  assert.equal(win.visible, false);
+
+  await app.svc('saveTask', { mode: 'create', form: form({ title: 'Background reminder' }) });
+  const engine = app.main.getEngine();
+  engine.tick(at('2030-01-10', '22:59'));
+  assert.equal(app.notifications.length, 0);
+  engine.tick(at('2030-01-10', '23:00'));
+  assert.equal(app.notifications.length, 1);
+  const toast = app.notifications[0];
+  assert.equal(toast.shown, true);
+  assert.ok(toast.options.toastXml.includes('Background reminder'));
+  assert.ok(toast.options.toastXml.includes('Snooze 5 min'));
+  assert.equal(win.visible, false, 'the window stayed hidden');
+  app.cleanup();
+});
+
+test('Wake from sleep runs a check at once and refreshes the window', async () => {
+  const app = await launch();
+  app.ipcOn['renderer-ready']();
+  const win = app.win();
+  const before = app.main.getEngine().state.lastTickAt;
+  assert.ok(app.powerEvents.resume && app.powerEvents['unlock-screen']);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  app.powerEvents.resume();
+  assert.ok(app.main.getEngine().state.lastTickAt >= before);
+  assert.ok(win.sent.some(([channel]) => channel === 'data-changed'));
+  app.cleanup();
+});
+
+test('Quitting stops the reminder engine and saves its state', async () => {
+  const app = await launch();
+  app.appEvents['before-quit'][0]();
+  assert.ok(app.dataFile().reminderState.lastTickAt > 0);
+  app.cleanup();
+});
+
+// ---- Window <-> service ------------------------------------------------------------------------------------------------------
 
 test('The window can call planner actions, but only the allowed ones', async () => {
   const app = await launch();
@@ -178,7 +484,7 @@ test('Saving a task writes the data file in the user data folder, and tells the 
   const saved = app.dataFile();
   assert.equal(saved.tasks.length, 1);
   assert.equal(saved.tasks[0].title, 'Study');
-  assert.ok(app.windows[0].sent.some(([channel]) => channel === 'data-changed'));
+  assert.ok(app.win().sent.some(([channel]) => channel === 'data-changed'));
   app.cleanup();
 });
 
@@ -212,65 +518,6 @@ test('Export writes a backup file; import restores it; cancelling does nothing',
   await assert.rejects(() => d.ipc['import-data'](), /not a Daily Planner backup/);
   d.cleanup();
   fs.rmSync(dir, { recursive: true, force: true });
-});
-
-test('Notification buttons: Mark as Done and Snooze act quietly, without showing the window', async () => {
-  const app = await launch();
-  const { taskId } = await app.svc('saveTask', { mode: 'create', form: form() });
-  const shownBefore = app.windows[0].shown;
-
-  app.appEvents['second-instance'][0]({}, ['Daily Planner.exe', `dailyplanner://snooze?task=${taskId}&date=2030-01-10`]);
-  assert.equal(app.dataFile().reminderState.snoozed.length, 1);
-
-  app.appEvents['second-instance'][0]({}, ['Daily Planner.exe', `dailyplanner://done?task=${taskId}&date=2030-01-10`]);
-  const saved = app.dataFile();
-  assert.equal(saved.tasks[0].completions['2030-01-10'], true);
-  assert.equal(saved.reminderState.snoozed.length, 0, 'done cancels the snooze');
-  assert.equal(app.windows[0].shown, shownBefore, 'the window was not brought up');
-  app.cleanup();
-});
-
-test('Clicking a notification opens the window on that task; a plain second launch just shows the window', async () => {
-  const app = await launch();
-  const { taskId } = await app.svc('saveTask', { mode: 'create', form: form() });
-  const win = app.windows[0];
-
-  // The window is not ready yet: the request waits
-  app.appEvents['second-instance'][0]({}, ['x.exe', `dailyplanner://open?task=${taskId}&date=2030-01-10`]);
-  assert.ok(!win.sent.some(([c]) => c === 'open-task'));
-  assert.equal(win.shown, 1);
-
-  app.ipcOn['renderer-ready']();
-  assert.deepEqual(win.sent.find(([c]) => c === 'open-task')[1], { taskId, dateKey: '2030-01-10' });
-
-  app.appEvents['second-instance'][0]({}, ['x.exe']);
-  assert.equal(win.shown, 2);
-  app.cleanup();
-});
-
-test('A second copy of the app quits immediately and the first keeps running', async () => {
-  const app = await launch({ lock: false });
-  assert.equal(app.quitCalled, true);
-  assert.equal(app.windows.length, 0);
-  app.cleanup();
-});
-
-test('Closing the last window quits the app (until Milestone 5 adds the tray)', async () => {
-  const app = await launch();
-  app.appEvents['window-all-closed'][0]();
-  assert.equal(app.quitCalled, true);
-  app.appEvents['before-quit'][0](); // saves the reminder state
-  assert.ok(app.dataFile().reminderState);
-  app.cleanup();
-});
-
-test('The reminder engine starts with the app', async () => {
-  const app = await launch();
-  await app.svc('saveTask', { mode: 'create', form: form() });
-  app.appEvents['before-quit'][0]();
-  const state = app.dataFile().reminderState;
-  assert.ok(state.lastTickAt > 0, 'the engine has checked at least once');
-  app.cleanup();
 });
 
 test('The preload script exposes only the expected functions', () => {

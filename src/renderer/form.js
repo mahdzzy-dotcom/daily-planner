@@ -80,14 +80,17 @@
     }
     const originalRule = f.recurrence ? JSON.stringify(f.recurrence) : null;
     const settings = DP.state.settings;
+    // The other tasks this one could follow (for "Relative to Task").
+    const choices = await DP.call('getReferenceChoices', { taskId: options.taskId || null });
 
     const dlg = DP.openDialog({ title: isEdit ? 'Edit task' : 'New task', wide: true });
     const errorsBox = h('div', { class: 'errors', hidden: true });
     const startBox = h('div');
     const startReadout = h('div', { class: 'readout' });
+    const startWarning = h('div', { class: 'note start-warning', hidden: true });
     const endReadout = h('div', { class: 'readout', 'aria-label': 'End time' });
     const zoneReadout = h('div', { class: 'readout zone-readout', 'aria-label': 'Zone' });
-    const placementNote = h('div', { class: 'note', hidden: true });
+    const placementNote = h('div', { class: 'note placement', hidden: true });
     const dateBox = h('div');
     const recurrenceBox = h('div');
     const remindersBox = h('div');
@@ -98,11 +101,18 @@
       const seq = ++previewSeq;
       let p;
       try {
-        p = await DP.call('previewForm', f);
+        p = await DP.call('previewForm', f, { taskId: options.taskId || null });
       } catch (error) {
         return;
       }
       if (seq !== previewSeq) return;
+
+      if (p.resolved && p.resolved.warning) {
+        startWarning.hidden = false;
+        startWarning.textContent = p.resolved.warning;
+      } else {
+        startWarning.hidden = true;
+      }
 
       startReadout.textContent = p.resolved ? p.resolved.startLabel : '—';
       endReadout.textContent = p.resolved && p.resolved.endLabel ? p.resolved.endLabel + (p.resolved.endsNextDay ? ' (next day)' : '') : '—';
@@ -139,23 +149,30 @@
     // ---- start time ----
     function renderStart() {
       clear(startBox);
-      const isFixed = f.start.mode === 'fixed';
+      const mode = f.start.mode;
       const toggle = h(
         'div', { class: 'segmented', role: 'group', 'aria-label': 'Start time type' },
         h('button', {
-          type: 'button', class: isFixed ? 'on' : '', text: 'Fixed Time',
+          type: 'button', class: mode === 'fixed' ? 'on' : '', text: 'Fixed Time',
           onclick: () => { f.start = { mode: 'fixed', time: '09:00' }; renderStart(); changed(); },
         }),
         h('button', {
-          type: 'button', class: isFixed ? '' : 'on', text: 'Relative to Prayer',
+          type: 'button', class: mode === 'prayer' ? 'on' : '', text: 'Relative to Prayer',
           onclick: () => { f.start = { mode: 'prayer', prayer: 'asr', direction: 'after', minutes: 10 }; renderStart(); changed(); },
+        }),
+        h('button', {
+          type: 'button', class: mode === 'task' ? 'on' : '', text: 'Relative to Task',
+          onclick: () => {
+            f.start = { mode: 'task', taskId: choices.length ? choices[0].taskId : '', point: 'end', direction: 'after', minutes: 0, fallbackTime: '09:00' };
+            renderStart(); changed();
+          },
         })
       );
       startBox.appendChild(toggle);
 
-      if (isFixed) {
+      if (mode === 'fixed') {
         startBox.appendChild(h('div', { class: 'row', style: { marginTop: '10px' } }, DP.timePicker(f.start.time, (t) => { f.start.time = t; changed(); })));
-      } else {
+      } else if (mode === 'prayer') {
         const prayerSel = h('select', { class: 'sel-auto', 'aria-label': 'Prayer', onchange: (e) => { f.start.prayer = e.target.value; changed(); } },
           PRAYERS.map(([key, label]) => h('option', { value: key, text: label, selected: f.start.prayer === key })));
         const dirSel = h('select', { class: 'sel-auto', 'aria-label': 'Before or after', onchange: (e) => { f.start.direction = e.target.value; changed(); } },
@@ -166,7 +183,29 @@
           oninput: (e) => { f.start.minutes = e.target.value === '' ? NaN : Number(e.target.value); changed(); },
         });
         startBox.appendChild(h('div', { class: 'row', style: { marginTop: '10px' } }, mins, h('span', { text: 'minutes' }), dirSel, prayerSel));
+      } else {
+        // Relative to another task: "15 minutes after the end of <task>"
+        const mins = h('input', {
+          type: 'number', class: 'num', min: '0', value: String(f.start.minutes), 'aria-label': 'Minutes',
+          oninput: (e) => { f.start.minutes = e.target.value === '' ? NaN : Number(e.target.value); changed(); },
+        });
+        const dirSel = h('select', { class: 'sel-auto', 'aria-label': 'Before or after', onchange: (e) => { f.start.direction = e.target.value; changed(); } },
+          h('option', { value: 'before', text: 'before', selected: f.start.direction === 'before' }),
+          h('option', { value: 'after', text: 'after', selected: f.start.direction === 'after' }));
+        const pointSel = h('select', { class: 'sel-auto', 'aria-label': 'Start or end of that task', onchange: (e) => { f.start.point = e.target.value; changed(); } },
+          h('option', { value: 'start', text: 'start', selected: f.start.point === 'start' }),
+          h('option', { value: 'end', text: 'end', selected: f.start.point === 'end' }));
+        const taskSel = h('select', { 'aria-label': 'Task to follow', onchange: (e) => { f.start.taskId = e.target.value; changed(); } },
+          h('option', { value: '', text: choices.length ? 'Choose a task…' : 'There are no other tasks yet' }),
+          choices.map((c) => h('option', { value: c.taskId, text: c.label, selected: f.start.taskId === c.taskId })));
+        startBox.appendChild(h('div', { class: 'row', style: { marginTop: '10px' } },
+          mins, h('span', { text: 'minutes' }), dirSel, h('span', { text: 'the' }), pointSel, h('span', { text: 'of' })));
+        startBox.appendChild(h('div', { style: { marginTop: '8px' } }, taskSel));
+        startBox.appendChild(h('div', { class: 'row', style: { marginTop: '10px' } },
+          h('span', { class: 'hint', text: 'Backup start time, used on days when that task is not there:' }),
+          DP.timePicker(f.start.fallbackTime, (t) => { f.start.fallbackTime = t; changed(); })));
       }
+      renderDate();
     }
 
     // ---- duration ----
@@ -193,7 +232,12 @@
         h('div', { class: 'field' },
           h('label', { for: 'f-date', text: 'Date' }),
           h('input', { type: 'date', id: 'f-date', value: f.date || '', oninput: (e) => { f.date = e.target.value; changed(); } }),
-          h('p', { class: 'hint', text: 'The calendar date of the start time. A task after midnight but before Fajr still appears under the previous Planning Day.' }))
+          h('p', {
+            class: 'hint',
+            text: f.start.mode === 'task'
+              ? 'The date of the task it follows: that day\'s occurrence of the other task is used.'
+              : 'The calendar date of the start time. A task after midnight but before Fajr still appears under the previous Planning Day.',
+          }))
       );
     }
 
@@ -417,7 +461,8 @@
       errorsBox,
       h('div', { class: 'field' }, h('label', { for: 'f-title', text: 'Title' }), titleInput),
       h('div', { class: 'field' }, h('div', { class: 'label', text: 'Start Time' }), startBox,
-        h('div', { class: 'row', style: { marginTop: '10px' } }, h('span', { class: 'hint', text: 'Starts at' }), startReadout)),
+        h('div', { class: 'row', style: { marginTop: '10px' } }, h('span', { class: 'hint', text: 'Starts at' }), startReadout),
+        startWarning),
       h('div', { class: 'field' }, h('div', { class: 'label', text: 'Duration' }),
         h('div', { class: 'row' }, hoursInput, h('span', { text: 'h' }), minutesInput, h('span', { text: 'min' }),
           h('span', { class: 'hint', text: 'Ends at' }), endReadout)),
@@ -444,7 +489,7 @@
 
     async function onSave() {
       f.title = titleInput.value;
-      const p = await DP.call('previewForm', f);
+      const p = await DP.call('previewForm', f, { taskId: options.taskId || null });
       const problems = p.errors.slice();
       if (f.title.trim() === '') problems.unshift('Please enter a title');
       if (problems.length) {
@@ -477,17 +522,30 @@
       if (info.isRecurring) {
         scope = await DP.askScope({ title: 'Delete task', verb: 'Delete', allowThis: true });
         if (scope === null) return;
-      } else {
-        const answer = await DP.ask({
-          title: 'Delete task', message: `Delete "${f.title}"?`,
-          choices: [{ label: 'Cancel', value: false }, { label: 'Delete', value: true, kind: 'danger' }],
-        });
-        if (!answer) return;
       }
       try {
-        await DP.call('deleteTask', { taskId: options.taskId, dateKey: options.dateKey, scope });
+        const impact = await DP.call('getDeleteImpact', { taskId: options.taskId, dateKey: options.dateKey, scope });
+        if (impact.wholeTask && impact.dependents.length > 0) {
+          const names = impact.dependents.map((d) => `“${d.title}”`).join(', ');
+          const go = await DP.ask({
+            title: 'Other tasks follow this task',
+            message: `These tasks start relative to “${f.title}”: ${names}. If you delete it, they stay at the times they have now, as fixed times.`,
+            choices: [{ label: 'Cancel', value: false }, { label: 'Delete anyway', value: true, kind: 'danger' }],
+          });
+          if (!go) return;
+        } else if (!info.isRecurring) {
+          const answer = await DP.ask({
+            title: 'Delete task', message: `Delete "${f.title}"?`,
+            choices: [{ label: 'Cancel', value: false }, { label: 'Delete', value: true, kind: 'danger' }],
+          });
+          if (!answer) return;
+        }
+        const result = await DP.call('deleteTask', { taskId: options.taskId, dateKey: options.dateKey, scope });
         dlg.close();
-        DP.toast('Task deleted');
+        const inexact = (result.frozen || []).filter((t) => !t.exact);
+        DP.toast(inexact.length
+          ? `Task deleted. “${inexact.map((t) => t.title).join('”, “')}” could not keep its exact time and uses its backup time.`
+          : 'Task deleted');
         DP.afterChange();
       } catch (error) {
         showErrors([error.message]);

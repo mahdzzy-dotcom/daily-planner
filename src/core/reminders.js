@@ -57,6 +57,7 @@ function remindersInWindow(provider, tasks, fromMs, toMs, settings, options = {}
   if (settings && settings.workingDays && !options.workingDays) {
     options = { ...options, workingDays: settings.workingDays };
   }
+  options = { ...options, tasks }; // lets tasks that follow other tasks find them
   const margin = Math.ceil(largestOffsetMinutes(tasks, settings) / 1440);
   const fromKey = addDaysToKey(dateKey(new Date(fromMs)), -2);
   const toKey = addDaysToKey(dateKey(new Date(toMs)), 2 + margin);

@@ -6,7 +6,8 @@
 //   {
 //     id, title,
 //     start: { mode: 'fixed', time: '09:00' }
-//          | { mode: 'prayer', prayer: 'asr', direction: 'after', minutes: 10 },
+//          | { mode: 'prayer', prayer: 'asr', direction: 'after', minutes: 10 }
+//          | { mode: 'task', taskId: 'abc', point: 'end', direction: 'after', minutes: 15, fallbackTime: '09:00' },
 //     durationMinutes,
 //     date,                // one-off tasks: calendar date of the start ('2026-10-05'); recurring: null
 //     recurrence,          // null, or a rule (see recurrence.js)
@@ -24,9 +25,11 @@
 const {
   isValidKey,
   addDaysToKey,
+  addMinutes,
   keyToDayNumber,
   parseDateKey,
   formatKeyShort,
+  dateKey: dateKeyOf,
 } = require('./time');
 const {
   PRAYERS,
@@ -59,7 +62,16 @@ function validateStart(start) {
     if (!Number.isInteger(start.minutes) || start.minutes < 0) errors.push('Minutes must be a whole number, 0 or more');
     return errors;
   }
-  return ['Start time must be a fixed time or relative to a prayer'];
+  if (start.mode === 'task') {
+    const errors = [];
+    if (typeof start.taskId !== 'string' || start.taskId === '') errors.push('Choose the task this one should follow');
+    if (start.point !== 'start' && start.point !== 'end') errors.push('Choose the start or the end of that task');
+    if (start.direction !== 'before' && start.direction !== 'after') errors.push('Choose Before or After that task');
+    if (!Number.isInteger(start.minutes) || start.minutes < 0) errors.push('Minutes must be a whole number, 0 or more');
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(start.fallbackTime || '')) errors.push('Choose a backup start time');
+    return errors;
+  }
+  return ['Start time must be a fixed time, relative to a prayer, or relative to another task'];
 }
 
 function validateDuration(minutes) {
@@ -121,18 +133,74 @@ function createTask(input) {
 
 // ---- Occurrences ---------------------------------------------------------------------------
 
-// Resolve the actual start moment of a start-time definition on a calendar date.
-function startAtDate(provider, start, dateKey) {
+const MAX_CHAIN = 25;
+const WARNINGS = {
+  missing: 'The task it follows is not on this day, so the backup start time is used.',
+  loop: 'This task and the one it follows depend on each other, so the backup start time is used.',
+  inherited: 'A task earlier in this chain is not on this day, so this time is based on its backup start time.',
+};
+
+function fallbackStart(start, dateKey, warning) {
+  const [h, m] = start.fallbackTime.split(':').map(Number);
+  const d = parseDateKey(dateKey);
+  d.setHours(h, m, 0, 0);
+  return { start: d, warning, followsTaskId: start.taskId };
+}
+
+// Tasks that were split off an earlier task by "This and following" edits continue its schedule.
+function referenceCandidates(tasks, taskId) {
+  const ids = [taskId];
+  for (let i = 0; i < ids.length && ids.length < 50; i++) {
+    for (const t of tasks) if (t.continuedFrom === ids[i] && !ids.includes(t.id)) ids.push(t.id);
+  }
+  return ids;
+}
+
+function findReferenceOccurrence(provider, tasks, taskId, dateKey, context) {
+  for (const id of referenceCandidates(tasks, taskId)) {
+    const task = tasks.find((t) => t.id === id);
+    if (!task) continue;
+    const dates = expandDates(task, dateKey, dateKey, context);
+    if (dates.length > 0) return buildOccurrence(provider, task, dateKey, dates[0].isAddition, context);
+  }
+  return null;
+}
+
+// Works out the actual start moment of a start definition on a calendar date.
+// Returns { start: Date, warning: null | text, followsTaskId }.
+// context: { tasks, workingDays, visiting } - `tasks` is needed for "relative to a task".
+function resolveStart(provider, start, dateKey, context = {}, ownerId = null) {
   if (start.mode === 'fixed') {
     const [h, m] = start.time.split(':').map(Number);
     const d = parseDateKey(dateKey);
     d.setHours(h, m, 0, 0);
-    return d;
+    return { start: d, warning: null, followsTaskId: null };
   }
   if (start.mode === 'prayer') {
-    return resolvePrayerRelative(provider, dateKey, start);
+    return { start: resolvePrayerRelative(provider, dateKey, start), warning: null, followsTaskId: null };
+  }
+  if (start.mode === 'task') {
+    const visiting = new Set(context.visiting || []);
+    if (ownerId) visiting.add(ownerId);
+    if (visiting.has(start.taskId) || visiting.size > MAX_CHAIN) return fallbackStart(start, dateKey, WARNINGS.loop);
+    const reference = findReferenceOccurrence(provider, context.tasks || [], start.taskId, dateKey, {
+      ...context,
+      visiting,
+    });
+    if (!reference) return fallbackStart(start, dateKey, WARNINGS.missing);
+    const base = start.point === 'start' ? reference.start : reference.end;
+    const minutes = start.direction === 'before' ? -start.minutes : start.minutes;
+    // If the task it follows had to use a backup time, say so here too.
+    let warning = null;
+    if (reference.startWarning) warning = reference.startWarning === WARNINGS.loop ? WARNINGS.loop : WARNINGS.inherited;
+    return { start: addMinutes(base, minutes), warning, followsTaskId: start.taskId };
   }
   throw new Error(`Unknown start mode: ${start.mode}`);
+}
+
+// Just the start moment (see resolveStart).
+function startAtDate(provider, start, dateKey, context = {}) {
+  return resolveStart(provider, start, dateKey, context).start;
 }
 
 // Calendar dates on which the task occurs between fromKey and toKey (inclusive).
@@ -159,7 +227,7 @@ function expandDates(task, fromKey, toKey, options = {}) {
     .map(([dateKey, isAddition]) => ({ dateKey, isAddition }));
 }
 
-function buildOccurrence(provider, task, dateKey, isAddition = false) {
+function buildOccurrence(provider, task, dateKey, isAddition = false, context = {}) {
   const override = task.overrides[dateKey] || {};
   const merged = {
     title: task.title,
@@ -171,7 +239,8 @@ function buildOccurrence(provider, task, dateKey, isAddition = false) {
     reminders: task.reminders,
     ...override,
   };
-  const start = startAtDate(provider, merged.start, dateKey);
+  const resolved = resolveStart(provider, merged.start, dateKey, context, task.id);
+  const start = resolved.start;
   const end = computeEnd(start, merged.durationMinutes);
   return {
     id: `${task.id}@${dateKey}`,
@@ -190,12 +259,14 @@ function buildOccurrence(provider, task, dateKey, isAddition = false) {
     isRecurring: Boolean(task.recurrence),
     isAddition,
     isOverridden: Object.keys(override).length > 0,
+    startWarning: resolved.warning,
+    followsTaskId: resolved.followsTaskId,
   };
 }
 
 function getOccurrences(provider, task, fromKey, toKey, options = {}) {
   return expandDates(task, fromKey, toKey, options).map(({ dateKey, isAddition }) =>
-    buildOccurrence(provider, task, dateKey, isAddition)
+    buildOccurrence(provider, task, dateKey, isAddition, options)
   );
 }
 
@@ -206,7 +277,8 @@ function occurrencesForPlanningDay(provider, tasks, planningDayKey, options = {}
   const boundaries = getBoundaries(provider, planningDayKey);
   const from = addDaysToKey(planningDayKey, -2);
   const to = addDaysToKey(planningDayKey, 2);
-  const all = tasks.flatMap((task) => getOccurrences(provider, task, from, to, options));
+  const context = { ...options, tasks };
+  const all = tasks.flatMap((task) => getOccurrences(provider, task, from, to, context));
   return all
     .filter((o) => o.end > boundaries.fajr && o.start < boundaries.nextFajr)
     .sort((a, b) => a.start - b.start);
@@ -351,6 +423,7 @@ function editTask(task, scope, dateKey, patch, options = {}) {
 
   const created = { ...clone(task), ...clone(fields) };
   created.id = options.newId;
+  created.continuedFrom = task.id; // tasks that follow the original keep following the later part
   created.date = null;
   created.recurrence = newRule;
   created.exceptions = task.exceptions.filter((k) => atOrAfter(k, dateKey));
@@ -394,6 +467,117 @@ function deleteOccurrences(task, scope, dateKey, options = {}) {
   return updated;
 }
 
+// ---- Tasks that follow other tasks ------------------------------------------------------------------------
+
+// The ids of the tasks this task follows (in its normal start time and in single-occurrence edits).
+function referencedTaskIds(task) {
+  const ids = new Set();
+  const add = (start) => {
+    if (start && start.mode === 'task') ids.add(start.taskId);
+  };
+  add(task.start);
+  for (const key of Object.keys(task.overrides || {})) add(task.overrides[key].start);
+  return ids;
+}
+
+// The tasks that follow the given task.
+function findDependents(tasks, taskId) {
+  return tasks.filter((t) => t.id !== taskId && referencedTaskIds(t).has(taskId));
+}
+
+// A friendly message if `task` (about to be saved) follows a missing task, itself, or would
+// create a circle of tasks following each other. Otherwise null.
+function dependencyProblem(tasks, task) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  byId.set(task.id, task);
+  for (const refId of referencedTaskIds(task)) {
+    if (refId === task.id) return 'A task cannot start relative to itself.';
+    if (!byId.has(refId)) return 'The task this one follows no longer exists. Please choose another.';
+  }
+  const visiting = new Set();
+  const finished = new Set();
+  const loops = (id) => {
+    if (visiting.has(id)) return true;
+    if (finished.has(id)) return false;
+    visiting.add(id);
+    const t = byId.get(id);
+    if (t) {
+      for (const ref of referencedTaskIds(t)) {
+        if (loops(ref)) return true;
+      }
+    }
+    visiting.delete(id);
+    finished.add(id);
+    return false;
+  };
+  if (loops(task.id)) return 'These tasks would follow each other in a circle. Please choose a different task to follow.';
+  return null;
+}
+
+// True when `candidateId` follows `taskId` directly or through other tasks.
+function followsTransitively(tasks, candidateId, taskId) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const seen = new Set();
+  const walk = (id) => {
+    if (id === taskId) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const t = byId.get(id);
+    return t ? Array.from(referencedTaskIds(t)).some(walk) : false;
+  };
+  return walk(candidateId);
+}
+
+function clockText(date) {
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+// A task that is being deleted completely: the tasks following it keep the times they have now,
+// as fixed times. `tasks` must still contain the deleted task. Returns
+// { tasks: the list without the deleted task, frozen: [{ taskId, title, exact }] }.
+// exact is false when the exact time cannot be written as a fixed time (the task crosses midnight),
+// in which case its backup time is used.
+function freezeDependents(provider, tasks, deletedId, dateKey, options = {}) {
+  const context = { ...options, tasks };
+  const frozen = [];
+
+  // The clock time an occurrence has now, as a fixed start (or null when it cannot be kept exactly).
+  const fixedFor = (task, key) => {
+    const occurrence = buildOccurrence(provider, task, key, false, context);
+    if (occurrence.startWarning) return null;
+    if (dateKeyOf(occurrence.start) !== key) return null;
+    return { mode: 'fixed', time: clockText(occurrence.start) };
+  };
+
+  const updated = tasks
+    .filter((t) => t.id !== deletedId)
+    .map((task) => {
+      if (!referencedTaskIds(task).has(deletedId)) return task;
+      const copy = clone(task);
+      let exact = true;
+      const freeze = (def, key) => {
+        const fixed = key ? fixedFor(task, key) : null;
+        if (fixed) return fixed;
+        exact = false;
+        return { mode: 'fixed', time: def.fallbackTime };
+      };
+
+      if (copy.start.mode === 'task' && copy.start.taskId === deletedId) {
+        // Use the first occurrence on or after the deleted day (or the deleted day itself).
+        const window = expandDates(task, dateKey, addDaysToKey(dateKey, 366), context);
+        copy.start = freeze(copy.start, window.length ? window[0].dateKey : null);
+      }
+      for (const key of Object.keys(copy.overrides)) {
+        const def = copy.overrides[key].start;
+        if (def && def.mode === 'task' && def.taskId === deletedId) copy.overrides[key].start = freeze(def, key);
+      }
+      frozen.push({ taskId: task.id, title: task.title, exact });
+      return copy;
+    });
+
+  return { tasks: updated, frozen };
+}
+
 module.exports = {
   PRIORITIES,
   SCOPES,
@@ -401,6 +585,12 @@ module.exports = {
   validateTask,
   createTask,
   startAtDate,
+  resolveStart,
+  referencedTaskIds,
+  findDependents,
+  dependencyProblem,
+  followsTransitively,
+  freezeDependents,
   expandDates,
   buildOccurrence,
   getOccurrences,

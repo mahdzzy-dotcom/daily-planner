@@ -12,7 +12,8 @@ const {
   mergeSettings, buildExport, parseImport,
   createTask, validateTask, validateStart, validateRule, normalizeRule, describeRule, previewDates,
   occurrencesForPlanningDay, computeDayLayout, currentPlanningDayKey, getOccurrences, buildOccurrence,
-  startAtDate, computeEnd, placementNote, setCompletion, editTask, deleteOccurrences,
+  startAtDate, resolveStart, computeEnd, placementNote, setCompletion, editTask, deleteOccurrences,
+  dependencyProblem, findDependents, followsTransitively, freezeDependents,
   remindersInWindow, reminderOffsets, createPrayerProvider,
   addDaysToKey, dateKey, formatTime12, formatDuration, formatKeyShort, weekdayOfKey, parseDateKey, isValidKey,
 } = core;
@@ -66,8 +67,9 @@ class PlannerService {
     return this.providerCache.provider;
   }
 
+  // Options used whenever occurrences are worked out. `tasks` lets tasks that follow other tasks find them.
   recurrenceOptions() {
-    return { workingDays: this.settings.workingDays };
+    return { workingDays: this.settings.workingDays, tasks: this.data.tasks };
   }
 
   persist() {
@@ -142,7 +144,16 @@ class PlannerService {
       overlaps: Boolean(o.overlaps),
       extendsPastZoneEnd: Boolean(o.extendsPastZoneEnd),
       overdue: !o.done && o.end.getTime() <= nowDate.getTime(),
+      followsTitle: this.followsTitle(o.startDefinition),
+      startWarning: o.startWarning || null,
     };
+  }
+
+  // For a task that follows another task: the other task's title.
+  followsTitle(startDefinition) {
+    if (!startDefinition || startDefinition.mode !== 'task') return null;
+    const other = this.data.tasks.find((t) => t.id === startDefinition.taskId);
+    return other ? other.title : 'a deleted task';
   }
 
   getDay(planningKey) {
@@ -246,7 +257,7 @@ class PlannerService {
 
   getTaskForEdit({ taskId, dateKey: key }) {
     const task = this.findTask(taskId);
-    const occurrence = buildOccurrence(this.provider(), task, key);
+    const occurrence = buildOccurrence(this.provider(), task, key, false, this.recurrenceOptions());
     return {
       taskId,
       dateKey: key,
@@ -267,7 +278,7 @@ class PlannerService {
   }
 
   // Live preview shown while the form is open: resolved start, end, zone, and the repeat summary.
-  previewForm(form) {
+  previewForm(form, context = {}) {
     const provider = this.provider();
     const errors = [];
     const out = { errors, resolved: null, placement: null, rule: null };
@@ -297,9 +308,24 @@ class PlannerService {
       }
     }
 
+    if (form.start && form.start.mode === 'task' && validateStart(form.start).length === 0) {
+      const problem = dependencyProblem(this.data.tasks, {
+        id: context.taskId || '__new__',
+        start: form.start,
+        overrides: {},
+      });
+      if (problem) errors.push(problem);
+    }
+
     if (contextKey && validateStart(form.start).length === 0) {
-      const start = startAtDate(provider, form.start, contextKey);
-      out.resolved = { startLabel: formatTime12(start), endLabel: null, endsNextDay: false };
+      const resolvedStart = resolveStart(provider, form.start, contextKey, this.recurrenceOptions(), context.taskId || '__new__');
+      const start = resolvedStart.start;
+      out.resolved = {
+        startLabel: formatTime12(start),
+        endLabel: null,
+        endsNextDay: false,
+        warning: resolvedStart.warning,
+      };
       if (durationOk) {
         const end = computeEnd(start, form.durationMinutes);
         out.resolved.endLabel = formatTime12(end);
@@ -338,6 +364,7 @@ class PlannerService {
 
     if (payload.mode === 'create') {
       const task = createTask({ id: this.newId(), ...fields, recurrence, date });
+      this.checkDependencies(task);
       this.data.tasks.push(task);
       this.changed();
       return { ok: true, taskId: task.id };
@@ -362,7 +389,7 @@ class PlannerService {
       ({ updated } = editTask(old, 'all', key, { ...fields, date }));
     } else {
       // Only the fields the user really changed are sent, so single-occurrence edits elsewhere survive.
-      const current = buildOccurrence(this.provider(), old, key);
+      const current = buildOccurrence(this.provider(), old, key, false, this.recurrenceOptions());
       const currentValues = {
         title: current.title,
         start: current.startDefinition,
@@ -387,19 +414,68 @@ class PlannerService {
       ({ updated, created } = editTask(old, scope, key, patch, { newId: this.newId(), ...this.recurrenceOptions() }));
     }
 
+    this.checkDependencies(updated);
     this.data.tasks = this.data.tasks.map((t) => (t.id === updated.id ? updated : t));
     if (created) this.data.tasks.push(created);
     this.changed();
     return { ok: true, taskId: updated.id };
   }
 
+  // Does this delete remove the whole task (so tasks that follow it lose it)?
+  deletesWholeTask(task, scope, key) {
+    if (!task.recurrence || scope === 'all') return true;
+    return scope === 'following' && key <= normalizeRule(task.recurrence).startDate;
+  }
+
+  // Tasks that start relative to this one, and whether this delete removes it completely.
+  getDeleteImpact({ taskId, dateKey: key, scope }) {
+    const task = this.findTask(taskId);
+    return {
+      wholeTask: this.deletesWholeTask(task, scope || 'all', key),
+      dependents: findDependents(this.data.tasks, taskId).map((t) => ({ taskId: t.id, title: t.title })),
+    };
+  }
+
   deleteTask({ taskId, dateKey: key, scope }) {
     const task = this.findTask(taskId);
     const result = deleteOccurrences(task, scope || 'all', key, this.recurrenceOptions());
-    if (result === null) this.data.tasks = this.data.tasks.filter((t) => t.id !== taskId);
-    else this.data.tasks = this.data.tasks.map((t) => (t.id === taskId ? result : t));
+    let frozen = [];
+    if (result === null) {
+      // Tasks that followed it keep the times they have now.
+      ({ tasks: this.data.tasks, frozen } = freezeDependents(this.provider(), this.data.tasks, taskId, key, this.recurrenceOptions()));
+    } else {
+      this.data.tasks = this.data.tasks.map((t) => (t.id === taskId ? result : t));
+    }
     this.changed();
-    return { ok: true };
+    return { ok: true, frozen };
+  }
+
+  checkDependencies(task) {
+    const problem = dependencyProblem(this.data.tasks, task);
+    if (problem) throw new Error(problem);
+  }
+
+  // The tasks a new or edited task can follow: everything except itself and the tasks that follow it.
+  getReferenceChoices({ taskId }) {
+    const describe = (def) => {
+      if (def.mode === 'fixed') {
+        const [h, m] = def.time.split(':').map(Number);
+        return formatTime12(new Date(2000, 0, 1, h, m));
+      }
+      if (def.mode === 'prayer') {
+        const name = def.prayer.charAt(0).toUpperCase() + def.prayer.slice(1);
+        return `${def.minutes} min ${def.direction} ${name}`;
+      }
+      return 'follows another task';
+    };
+    return this.data.tasks
+      .filter((t) => t.id !== taskId && !(taskId && followsTransitively(this.data.tasks, t.id, taskId)))
+      .sort((a, b) => a.title.localeCompare(b.title))
+      .map((t) => ({
+        taskId: t.id,
+        title: t.title,
+        label: `${t.title} (${describe(t.start)}, ${formatDuration(t.durationMinutes)}${t.recurrence ? ', repeats' : ''})`,
+      }));
   }
 
   setDone({ taskId, dateKey: key, done }) {
@@ -436,7 +512,11 @@ class PlannerService {
   }
 
   saveSettings(patch) {
-    this.data.settings = mergeSettings(this.data.settings, patch);
+    const previous = this.data.settings;
+    const merged = mergeSettings(previous, patch);
+    // Turning the "still running in the background" message back on shows it again at the next close.
+    if (patch.showBackgroundMessage === true && !previous.showBackgroundMessage) merged.backgroundMessageShown = false;
+    this.data.settings = merged;
     this.providerCache = null;
     this.persist();
     this.onSettingsChanged(copy(this.data.settings));
@@ -529,7 +609,7 @@ class PlannerService {
 // The names the window is allowed to call.
 const PUBLIC_METHODS = [
   'bootstrap', 'getDay', 'getUpcoming', 'newTaskDefaults', 'getTaskForEdit', 'previewForm', 'saveTask',
-  'deleteTask', 'setDone', 'duplicateTask', 'getSettings', 'saveSettings', 'addCategory', 'updateCategory',
+  'getReferenceChoices', 'getDeleteImpact', 'deleteTask', 'setDone', 'duplicateTask', 'getSettings', 'saveSettings', 'addCategory', 'updateCategory',
   'deleteCategory',
 ];
 

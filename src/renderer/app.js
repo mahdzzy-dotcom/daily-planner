@@ -23,6 +23,8 @@
     if (t.categoryName) {
       tags.push(h('span', { class: 'tag' }, h('span', { class: 'dot', style: { background: t.categoryColor } }), t.categoryName));
     }
+    if (t.followsTitle) tags.push(h('span', { class: 'tag', title: 'Starts relative to another task', text: `↳ Follows “${t.followsTitle}”` }));
+    if (t.startWarning) tags.push(h('span', { class: 'tag warn', title: t.startWarning, text: '⚠ Backup start time' }));
     if (t.isRecurring) tags.push(h('span', { class: 'tag', title: 'Repeats', text: '↻ Repeats' }));
     if (t.hasReminders) tags.push(h('span', { class: 'tag', title: 'Reminder on', text: '🔔 Reminder' }));
     if (t.overlaps) tags.push(h('span', { class: 'tag warn', title: 'Overlaps another task', text: '⚠ Overlaps' }));
