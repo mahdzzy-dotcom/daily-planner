@@ -146,7 +146,20 @@
           row('Default reminder', h('div', {}, numberField(s.defaultReminderOffsetMinutes, 0, 10080, 'minutes before the start', (n) => save({ defaultReminderOffsetMinutes: n }), 'Default reminder minutes'),
             h('p', { class: 'hint', text: 'Used when a task has reminders turned on but no times added.' }))),
           row('Snooze', numberField(s.snoozeMinutes, 1, 1440, 'minutes', (n) => save({ snoozeMinutes: n }), 'Snooze minutes')),
-          row('Zone start', toggle('Notify when each Zone begins', s.zoneStartNotifications, (v) => save({ zoneStartNotifications: v }), 'A notification at each prayer time.')))),
+          row('Zone start', toggle('Notify when each Zone begins', s.zoneStartNotifications, (v) => save({ zoneStartNotifications: v }), 'A notification at each prayer time.')),
+          row('Test', h('div', {},
+            h('button', {
+              class: 'btn', text: 'Send a test notification',
+              onclick: async () => {
+                try {
+                  await window.api.testNotification();
+                  DP.toast('Test notification sent. Look at the bottom-right corner of the screen.');
+                } catch (error) {
+                  DP.toast(error.message, 'error');
+                }
+              },
+            }),
+            h('p', { class: 'hint', text: 'Checks that Windows shows notifications. Try its Snooze and Mark as Done buttons too.' }))))),
 
       section('Application',
         h('div', { class: 'settings-grid' },

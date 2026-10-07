@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('api', {
   call: (method, ...args) => ipcRenderer.invoke('svc', method, args),
   exportData: () => ipcRenderer.invoke('export-data'),
   importData: () => ipcRenderer.invoke('import-data'),
+  testNotification: () => ipcRenderer.invoke('test-notification'),
   on: (channel, callback) => {
     if (!EVENTS.includes(channel)) return;
     ipcRenderer.on(channel, (event, payload) => callback(payload));

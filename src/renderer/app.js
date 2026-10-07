@@ -245,6 +245,32 @@
     dlg.footer.appendChild(h('button', { class: 'btn primary', text: 'OK', onclick: () => dlg.close() }));
   };
 
+  // ---- First run ---------------------------------------------------------------------------------------------------------
+
+  // A friendly first screen: choose the city (prayer times depend on it), then start.
+  DP.showWelcome = function showWelcome() {
+    let city = DP.state.settings.cityName;
+    const dlg = DP.openDialog({ title: 'Welcome to Daily Planner' });
+    const select = h('select', { id: 'welcome-city', 'aria-label': 'Your city', onchange: (e) => { city = e.target.value; } },
+      DP.state.cities.map((name) => h('option', { value: name, text: name, selected: name === city })));
+    dlg.body.append(
+      h('p', { class: 'dialog-message', text: 'Daily Planner divides your day into 5 zones using the prayer times, so it needs to know your city.' }),
+      h('div', { class: 'field' }, h('label', { for: 'welcome-city', text: 'Your city' }), select),
+      h('p', { class: 'hint', text: 'You can change this later in Settings. Everything stays on this computer.' }));
+    dlg.footer.appendChild(h('button', {
+      class: 'btn primary', text: 'Start planning',
+      onclick: async () => {
+        try {
+          DP.state.settings = await DP.call('saveSettings', { cityName: city, welcomeShown: true });
+          dlg.close();
+          await DP.showDay(DP.state.todayKey);
+        } catch (error) {
+          DP.toast(error.message, 'error');
+        }
+      },
+    }));
+  };
+
   // ---- Start-up -------------------------------------------------------------------------------------------------------------
 
   async function init() {
@@ -267,6 +293,8 @@
       clear(view()).appendChild(h('div', { class: 'errors', text: `Could not start: ${error.message}` }));
       return;
     }
+
+    if (!DP.state.settings.welcomeShown) DP.showWelcome();
 
     // The window keeps itself fresh: current zone, overdue marks, and changes made elsewhere.
     setInterval(() => { if (DP.state.view === 'daily' && !anyDialogOpen()) DP.afterChange(); }, 30000);

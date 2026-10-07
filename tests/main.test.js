@@ -520,6 +520,28 @@ test('Export writes a backup file; import restores it; cancelling does nothing',
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('The test notification works, and so do its buttons (checks the link route end to end)', async () => {
+  const app = await launch();
+  const result = await app.ipc['test-notification']();
+  assert.equal(result.ok, true);
+  assert.equal(app.notifications.length, 1);
+  const xml = app.notifications[0].options.toastXml;
+  assert.ok(xml.includes('Daily Planner test notification'));
+  assert.ok(xml.includes('Mark as Done'));
+
+  // Pretend Windows opened the app with the link behind each button
+  const links = [...xml.matchAll(/arguments="(dailyplanner:[^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, '&'));
+  assert.equal(links.length, 2);
+  app.appEvents['second-instance'][0]({}, ['Daily Planner.exe', links[0]]);
+  assert.equal(app.notifications.length, 2);
+  assert.ok(app.notifications[1].options.toastXml.includes('The notification buttons work'));
+  assert.ok(app.notifications[1].options.toastXml.includes('Snooze'));
+  assert.equal(app.dataFile().reminderState.snoozed.length, 0, 'the test does not create a real snooze');
+  app.appEvents['second-instance'][0]({}, ['Daily Planner.exe', links[1]]);
+  assert.ok(app.notifications[2].options.toastXml.includes('Mark as Done'));
+  app.cleanup();
+});
+
 test('The preload script exposes only the expected functions', () => {
   const sent = [];
   const exposed = {};
@@ -529,7 +551,7 @@ test('The preload script exposes only the expected functions', () => {
   };
   delete require.cache[require.resolve('../src/main/preload.js')];
   require('../src/main/preload.js');
-  assert.deepEqual(Object.keys(exposed.api).sort(), ['call', 'exportData', 'importData', 'on', 'ready']);
+  assert.deepEqual(Object.keys(exposed.api).sort(), ['call', 'exportData', 'importData', 'on', 'ready', 'testNotification']);
   exposed.api.call('getDay', '2030-01-10');
   assert.deepEqual(sent[0], ['svc', 'getDay', ['2030-01-10']]);
 });

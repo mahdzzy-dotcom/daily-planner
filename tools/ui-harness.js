@@ -25,12 +25,14 @@ function exampleProvider(key) {
 
 function createService(options = {}) {
   let counter = 0;
-  return new PlannerService({
+  const service = new PlannerService({
     store: new MemoryStore(),
     now: () => options.now || at('2026-10-04', '10:00'),
     newId: () => `t${++counter}`,
     providerFactory: () => exampleProvider,
   });
+  if (!options.firstRun) service.saveSettings({ welcomeShown: true });
+  return service;
 }
 
 async function openApp({ playwright, service, colorScheme = 'light', width = 1100, height = 900, executablePath }) {
@@ -53,6 +55,7 @@ async function openApp({ playwright, service, colorScheme = 'light', width = 110
       call: (method, ...args) => window.__invoke(method, args),
       exportData: async () => { window.__exports.push('export'); return { ok: true }; },
       importData: async () => ({ canceled: true }),
+      testNotification: async () => { window.__exports.push('test-notification'); return { ok: true }; },
       on: (channel, cb) => { (window.__handlers = window.__handlers || {})[channel] = cb; },
     };
   });

@@ -50,6 +50,7 @@ const DEFAULT_SETTINGS = {
   startWithWindows: false,
   showBackgroundMessage: true, // the "still running in the background" message on first close
   backgroundMessageShown: false,
+  welcomeShown: false, // the first-run "choose your city" screen
   theme: 'system',
   workingDays: [0, 1, 2, 3, 4], // Sunday - Thursday
 };
@@ -84,7 +85,7 @@ function validateSettings(settings) {
       errors.push('Choose at least one working day');
     }
   }
-  for (const key of ['notificationsEnabled', 'soundEnabled', 'zoneStartNotifications', 'startWithWindows', 'showBackgroundMessage', 'backgroundMessageShown']) {
+  for (const key of ['notificationsEnabled', 'soundEnabled', 'zoneStartNotifications', 'startWithWindows', 'showBackgroundMessage', 'backgroundMessageShown', 'welcomeShown']) {
     if (key in s && typeof s[key] !== 'boolean') errors.push(`${key} must be on or off`);
   }
   return errors;

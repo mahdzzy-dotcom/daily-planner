@@ -1,7 +1,7 @@
 {
   "name": "daily-planner",
   "productName": "Daily Planner",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Daily Planner - task manager with prayer-time zones",
   "private": true,
   "author": "Daily Planner",

@@ -62,6 +62,16 @@ function titlesOf(day, zoneIndex) {
 }
 
 // ---- Daily View ------------------------------------------------------------------------------------------
+test('The first-run welcome flag is a normal setting, off by default', () => {
+  const store = new MemoryStore();
+  const service = new PlannerService({ store, now: () => at(DAY, '10:00'), providerFactory: () => constantProvider });
+  assert.equal(service.getSettings().welcomeShown, false);
+  service.saveSettings({ cityName: 'Alexandria', welcomeShown: true });
+  assert.equal(service.getSettings().cityName, 'Alexandria');
+  assert.equal(service.getSettings().welcomeShown, true);
+  assert.throws(() => service.saveSettings({ welcomeShown: 'yes' }), /on or off/);
+});
+
 test('Start-up information', () => {
   const { service } = makeService();
   const b = service.bootstrap();

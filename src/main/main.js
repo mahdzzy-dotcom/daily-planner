@@ -27,6 +27,7 @@ const { createTray } = require('./tray');
 const ICON = path.join(__dirname, 'icon.png');
 const STARTUP_ARG = '--hidden'; // given to the app when Windows starts it at login
 const WATCHDOG_MS = 60000;
+const TEST_TASK_ID = '__test__'; // marks the buttons of the test notification
 
 let mainWindow = null;
 let service = null;
@@ -200,6 +201,20 @@ function startTray() {
 // action: { type: 'snooze' | 'done' | 'open' | 'missed', taskId, dateKey }
 function handleAction(action) {
   if (!action) return;
+  if (action.taskId === TEST_TASK_ID) {
+    // The test notification's buttons: show that the click reached the app.
+    if (notify) {
+      notify({
+        kind: 'info',
+        id: `test-reply-${Date.now()}`,
+        title: 'The notification buttons work',
+        lines: [`The “${action.type === 'done' ? 'Mark as Done' : 'Snooze'}” button reached Daily Planner.`],
+        silent: true,
+        actions: [],
+      });
+    }
+    return;
+  }
   if (action.type === 'snooze' || action.type === 'done') {
     // Buttons on a notification act quietly, without bringing the window up.
     try {
@@ -303,6 +318,24 @@ function registerIpc() {
     if (result.canceled || result.filePaths.length === 0) return { canceled: true };
     const text = fs.readFileSync(result.filePaths[0], 'utf8');
     return service.importData(text);
+  });
+
+  ipcMain.handle('test-notification', async () => {
+    const settings = service.getSettings();
+    notify({
+      kind: 'task',
+      id: `test-${Date.now()}`,
+      title: 'Daily Planner test notification',
+      lines: ['If you can see this, notifications work.', 'Try the buttons below.'],
+      silent: !settings.soundEnabled,
+      taskId: TEST_TASK_ID,
+      dateKey: new Date().toISOString().slice(0, 10),
+      actions: [
+        { type: 'snooze', label: `Snooze ${settings.snoozeMinutes} min` },
+        { type: 'done', label: 'Mark as Done' },
+      ],
+    });
+    return { ok: true };
   });
 
   ipcMain.on('renderer-ready', () => {

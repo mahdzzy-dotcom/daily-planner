@@ -454,6 +454,11 @@ async function setTime(page, hour, minute, ampm) {
     await page.waitForTimeout(150);
     assert.deepEqual(await page.evaluate(() => window.__exports), ['export']);
   });
+  await step('the "Send a test notification" button asks the app to send one', async () => {
+    await page.click('button:text-is("Send a test notification")');
+    await page.waitForSelector('.toast:has-text("Test notification sent")');
+    assert.deepEqual(await page.evaluate(() => window.__exports), ['export', 'test-notification']);
+  });
   await step('back to the Daily View keeps working', async () => {
     await page.click('.back-link');
     await page.waitForSelector('.zone');
@@ -465,6 +470,28 @@ async function setTime(page, hour, minute, ampm) {
   });
 
   await app.browser.close();
+
+  console.log('First run');
+  await step('the welcome screen asks for the city once, then the app is ready', async () => {
+    const fresh = createService({ firstRun: true });
+    const first = await openApp({ playwright, service: fresh, executablePath, width: 1000, height: 800 });
+    await first.page.waitForSelector('text=Welcome to Daily Planner');
+    assert.equal(await first.page.inputValue('#welcome-city'), 'Cairo');
+    await first.page.selectOption('#welcome-city', 'Alexandria');
+    await shot(first.page, 'welcome');
+    await first.page.click('button:text-is("Start planning")');
+    await first.page.waitForSelector('.overlay', { state: 'detached' });
+    assert.equal(fresh.getSettings().cityName, 'Alexandria');
+    assert.equal(fresh.getSettings().welcomeShown, true);
+    assert.deepEqual(first.errors, []);
+    await first.browser.close();
+
+    // Opening the app again does not show it a second time
+    const again = await openApp({ playwright, service: fresh, executablePath, width: 1000, height: 800 });
+    assert.equal((await again.page.$$('.overlay')).length, 0);
+    await again.browser.close();
+  });
+
   console.log(`\n${passed} steps passed${process.exitCode ? ', some FAILED' : ''}`);
 })().catch((error) => {
   console.error(error);

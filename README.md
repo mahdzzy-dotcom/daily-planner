@@ -12,7 +12,9 @@ Full specification: Daily_Planner_Spec.md (kept outside this folder).
 - `src/renderer/` - the screens (Daily View, task form, Settings)
 - `tests/` - automated tests (spec scenarios 1-18, 20, 27-29 and many more)
 - `tools/` - screenshot / click-through tools used while building (not part of the installed app)
-- `build/` - icon and installer script; `docs/` - backup file format
+- `build/` - icon and installer script
+- `docs/` - HOW_TO_INSTALL_AND_USE.md (for the user), ACCEPTANCE_CHECKLIST.md (what is checked where, and what to
+  try on a real PC), DATA_FORMAT.md (backup file format)
 
 ## GitHub does the work
 
@@ -23,6 +25,11 @@ Full specification: Daily_Planner_Spec.md (kept outside this folder).
 ## Start time options
 
 Fixed Time, Relative to Prayer, and Relative to Task ("15 minutes after the end of <task>").
+
+## First run
+
+A welcome screen asks for the city once. Settings -> Reminders has a "Send a test notification" button that also
+tests the Snooze / Mark as Done buttons.
 
 ## Assumptions made so far
 
