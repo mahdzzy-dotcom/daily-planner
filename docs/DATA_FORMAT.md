@@ -55,3 +55,11 @@ Export / Import (Settings -> Data) uses one JSON file. Version 1:
 - `recurrence`: `null` for one-off tasks. `frequency` is `daily`, `weekly`, `monthly` or `yearly`; see
   `src/core/recurrence.js` for every field (weekday lists, monthly modes, yearly modes, end rules).
 - `exceptions`, `additions`, `overrides` and `completions` are keyed by occurrence date (`YYYY-MM-DD`).
+
+## Full-screen alert
+
+- Each task's `reminders` object may contain `"fullScreen": true` (missing means off). Single-occurrence edits in
+  `overrides` can carry their own `reminders`, so one day can differ.
+- `settings` contains `fullScreenAlerts`, `fullScreenDefaultForNewTasks`, `alertScreens` (`"all"` or `"main"`) and
+  `alertAppearance` (colors as `#rrggbb`, `fontFamily`, `alignment`, and the groups `name`, `notes` and `show`).
+  Missing or invalid values are replaced by the defaults when a backup is imported.

@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   exportData: () => ipcRenderer.invoke('export-data'),
   importData: () => ipcRenderer.invoke('import-data'),
   testNotification: () => ipcRenderer.invoke('test-notification'),
+  previewAlert: () => ipcRenderer.invoke('preview-alert'),
   on: (channel, callback) => {
     if (!EVENTS.includes(channel)) return;
     ipcRenderer.on(channel, (event, payload) => callback(payload));

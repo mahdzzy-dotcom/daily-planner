@@ -42,6 +42,17 @@ or all of them.
 - Try it: Settings -> Reminders & Notifications -> **Send a test notification**.
 - If you were away (computer off or asleep), the app tells you which reminders you missed.
 
+### Full-screen alerts (hard to miss)
+
+For tasks you must not miss, switch on **Full-screen alert at the start time** in the task form. At exactly the start
+time the whole screen shows the task name, notes and details until you click a button: **Got it**, **Snooze**,
+**Open task** or **Mark as Done**. It covers every screen if you have more than one. For new tasks to have it
+switched on automatically, turn on Settings -> Full-screen reminder -> "Switch the full-screen alert on for new tasks".
+
+Settings -> **Full-screen reminder** lets you change the colors, the font, the size and style of the task name and
+the notes, and what details are shown, with ready-made looks and a **Preview full screen** button. A few
+presses right when it appears are ignored on purpose, so typing cannot close it by accident.
+
 ## 5. It keeps running in the background
 
 - When you close or minimize the window, Daily Planner **keeps running** in the tray (the small icons near the
@@ -72,6 +83,7 @@ Settings -> Apps -> Daily Planner -> Uninstall. The uninstaller asks whether to 
 | --- | --- |
 | No notifications appear | Click **Send a test notification** in Settings. If nothing shows: Windows Settings -> System -> Notifications, make sure notifications are on and "Daily Planner" is allowed; turn off Focus assist / Do not disturb. |
 | The notification buttons do nothing | Tell the person who built the app; this needs a fix on our side. |
+| The full-screen alert does not appear over a game or video | Programs running in exclusive full-screen can hide every other window. Try the program's windowed or borderless full-screen mode. |
 | The window disappeared | It is in the tray. Click the tray icon. |
 | Prayer times look wrong | Check the city and the calculation method in Settings, then add minutes of adjustment for the prayer that differs. |
 | A task shows "Backup start time" | It starts relative to another task that is not on that day. Change the task it follows, or accept the backup time you chose. |

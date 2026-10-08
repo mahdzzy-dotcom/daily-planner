@@ -18,6 +18,7 @@ const DEFAULT_REMINDER_SETTINGS = {
   defaultReminderOffsetMinutes: 10,
   snoozeMinutes: 5,
   zoneStartNotifications: false, // optional, default Off
+  fullScreenAlerts: true, // master switch for full-screen alerts (each task has its own switch too)
 };
 
 function withDefaults(settings) {
@@ -79,6 +80,7 @@ function remindersInWindow(provider, tasks, fromMs, toMs, settings, options = {}
             taskId: occ.taskId,
             dateKey: occ.dateKey,
             offsetMinutes: offset,
+            fullScreen: Boolean(occ.reminders && occ.reminders.fullScreen),
             notifyAt,
             title: occ.title,
             start: occ.start,
@@ -91,6 +93,45 @@ function remindersInWindow(provider, tasks, fromMs, toMs, settings, options = {}
     }
   }
   return result.sort((a, b) => a.notifyAt - b.notifyAt || (a.id < b.id ? -1 : 1));
+}
+
+// Occurrences with a full-screen alert whose start moment is after fromMs and at or before toMs.
+// The alert appears at the exact start time (not before). Completed occurrences get none.
+function alertsInWindow(provider, tasks, fromMs, toMs, settings, options = {}) {
+  if (settings && settings.workingDays && !options.workingDays) {
+    options = { ...options, workingDays: settings.workingDays };
+  }
+  options = { ...options, tasks };
+  const fromKey = addDaysToKey(dateKey(new Date(fromMs)), -2);
+  const toKey = addDaysToKey(dateKey(new Date(toMs)), 2);
+
+  const result = [];
+  for (const task of tasks) {
+    for (const occ of getOccurrences(provider, task, fromKey, toKey, options)) {
+      if (occ.done || !(occ.reminders && occ.reminders.fullScreen)) continue;
+      const t = occ.start.getTime();
+      if (t > fromMs && t <= toMs) {
+        const zone = deriveZone(provider, occ.start);
+        result.push({
+          id: `alert:${occ.id}@${t}`,
+          kind: 'alert',
+          occurrenceId: occ.id,
+          taskId: occ.taskId,
+          dateKey: occ.dateKey,
+          title: occ.title,
+          notes: occ.notes,
+          priority: occ.priority,
+          categoryId: occ.categoryId,
+          durationMinutes: occ.durationMinutes,
+          start: occ.start,
+          end: occ.end,
+          zoneIndex: zone.zoneIndex,
+          zoneName: zone.zoneName,
+        });
+      }
+    }
+  }
+  return result.sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : 1));
 }
 
 // Optional "a Zone begins" events: one at each prayer time (Fajr, Dhuhr, Asr, Maghrib, Isha).
@@ -216,6 +257,7 @@ module.exports = {
   DEFAULT_REMINDER_SETTINGS,
   reminderOffsets,
   remindersInWindow,
+  alertsInWindow,
   zoneStartEvents,
   formatTaskNotification,
   formatZoneNotification,

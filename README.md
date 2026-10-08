@@ -26,6 +26,12 @@ Full specification: Daily_Planner_Spec.md (kept outside this folder).
 
 Fixed Time, Relative to Prayer, and Relative to Task ("15 minutes after the end of <task>").
 
+## Full-screen alert
+
+`src/core/reminder-engine.js` sets one timer for the next start time, so the alert appears at the exact second.
+`src/main/alert-window.js` opens the borderless windows (one per screen); the page is `src/renderer/alert.html`
+(drawn by `alert-view.js`, which the Settings preview uses too). Settings: `src/core/settings.js`.
+
 ## First run
 
 A welcome screen asks for the city once. Settings -> Reminders has a "Send a test notification" button that also
@@ -38,6 +44,9 @@ tests the Snooze / Mark as Done buttons.
 - For "After N occurrences", excluded dates still count toward N; added one-offs do not.
 - "Last working day" uses the working days from Settings (default Sunday-Thursday).
 - A reminder up to 2 minutes late is still shown normally; older ones go to the missed summary.
+- A full-screen alert is only shown if it is at most 15 seconds late; otherwise the task goes into the missed summary.
+- The full-screen alert replaces the plain notification with offset 0; earlier reminders stay notifications.
+- The full-screen alert stays until a button is clicked (no automatic closing) and covers all screens by default.
 - Completed occurrences get no reminders.
 - New tasks start with reminders On and no custom times, so the default reminder time (10 minutes) is used.
 - The Hijri date shown is the Umm al-Qura date of the Planning Day's start date.

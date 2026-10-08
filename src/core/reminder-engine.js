@@ -17,6 +17,7 @@ const { setCompletion, getOccurrences } = require('./tasks');
 const {
   DEFAULT_REMINDER_SETTINGS,
   remindersInWindow,
+  alertsInWindow,
   zoneStartEvents,
   formatTaskNotification,
   formatZoneNotification,
@@ -31,6 +32,7 @@ const DAY_MS = 24 * 60 * MS_PER_MINUTE;
 const DEFAULTS = {
   tickMs: 15000, // how often the engine checks
   graceMs: 2 * MS_PER_MINUTE, // a reminder up to this late is still shown normally
+  alertGraceMs: 15000, // a full-screen alert is only shown if it is at most this late
   lookbackMs: DAY_MS, // missed reminders: roughly the previous 24 hours
   keepDeliveredMs: 2 * DAY_MS,
   saveEveryMs: 60000, // how often the "last checked" time is written to disk
@@ -46,6 +48,8 @@ class ReminderEngine {
   //   getProvider()   -> current prayer provider (changes when city/method/adjustments change)
   //   getSettings()   -> reminder settings (see DEFAULT_REMINDER_SETTINGS)
   //   notify(payload) -> show a notification (payload is built in reminders.js)
+  //   showAlert(items, settings) -> show the full-screen alert for tasks starting now
+  //   setTimeout / clearTimeout -> replaceable for tests (the exact-time timer)
   //   onMissed(items, payload) -> show the missed-reminders summary
   //   updateTask(task)-> save a changed task (used by "Mark as Done")
   //   initialState / saveState(state) -> persistence of the engine's own small state
@@ -58,6 +62,7 @@ class ReminderEngine {
     this.state.delivered = { ...this.state.delivered };
     this.state.snoozed = [...(this.state.snoozed || [])];
     this.timer = null;
+    this.alertTimer = null;
     this.lastSavedAt = 0;
   }
 
@@ -81,6 +86,7 @@ class ReminderEngine {
     const clear = this.deps.clearInterval || clearInterval;
     if (this.timer !== null) clear(this.timer);
     this.timer = null;
+    this.clearAlertTimer();
     this.flush();
   }
 
@@ -96,14 +102,51 @@ class ReminderEngine {
   // ---- The check ---------------------------------------------------------------------------------
 
   tick(nowDate = this.now()) {
-    const result = { delivered: [], missed: [], snoozed: [] };
+    const result = { delivered: [], missed: [], snoozed: [], alerts: [] };
     try {
       this.process(nowDate, result);
+      this.reschedule(nowDate);
     } catch (error) {
       if (this.deps.onError) this.deps.onError(error);
       else throw error;
     }
     return result;
+  }
+
+  // ---- The exact-time timer for full-screen alerts -------------------------------------------------
+
+  clearAlertTimer() {
+    if (this.alertTimer !== null) {
+      (this.deps.clearTimeout || clearTimeout)(this.alertTimer);
+      this.alertTimer = null;
+    }
+  }
+
+  // The next moment (within 24 hours) when a full-screen alert is due: a task start, or a snoozed alert.
+  nextAlertMoment(nowMs, settings) {
+    if (!settings.fullScreenAlerts) return null;
+    let next = null;
+    const first = alertsInWindow(this.deps.getProvider(), this.deps.getTasks(), nowMs, nowMs + DAY_MS, settings)[0];
+    if (first) next = first.start.getTime();
+    for (const snooze of this.state.snoozed) {
+      if (snooze.fullScreen && snooze.until > nowMs && (next === null || snooze.until < next)) next = snooze.until;
+    }
+    return next;
+  }
+
+  // Sets one timer for the next full-screen alert, so it appears at the exact second instead of
+  // waiting for the next regular check. Called after every check and whenever tasks or settings change.
+  reschedule(nowDate = this.now()) {
+    this.clearAlertTimer();
+    const nowMs = nowDate.getTime();
+    const target = this.nextAlertMoment(nowMs, this.settings());
+    if (target === null) return;
+    const set = this.deps.setTimeout || setTimeout;
+    this.alertTimer = set(() => {
+      this.alertTimer = null;
+      // Timers can fire a hair early; never act before the target moment itself.
+      this.tick(new Date(Math.max(this.now().getTime(), target)));
+    }, Math.max(0, target - nowMs));
   }
 
   process(nowDate, result) {
@@ -124,15 +167,20 @@ class ReminderEngine {
     const tasks = this.deps.getTasks();
     const provider = this.deps.getProvider();
 
-    if (settings.notificationsEnabled) {
-      const toShow = []; // { sortAt, payload }
-      const missed = [];
+    const toastsOn = settings.notificationsEnabled;
+    const alertsOn = settings.fullScreenAlerts;
+    const toShow = []; // notifications: { sortAt, occurrenceId, payload }
+    const alertsToShow = []; // full-screen alerts
+    const missed = [];
 
-      // 1. Task reminders
+    // 1. Task reminders (notifications)
+    if (toastsOn) {
       for (const r of remindersInWindow(provider, tasks, windowStart, now, settings)) {
         if (this.state.delivered[r.id]) continue;
         this.state.delivered[r.id] = now;
         changed = true;
+        // At the start time the full-screen alert takes the place of the plain notification.
+        if (alertsOn && r.fullScreen && r.offsetMinutes === 0) continue;
         if (now - r.notifyAt.getTime() <= o.graceMs) {
           toShow.push({
             sortAt: r.notifyAt.getTime(),
@@ -144,7 +192,7 @@ class ReminderEngine {
         }
       }
 
-      // 2. Optional zone-start notifications: informational, never late, never "missed"
+      // Optional zone-start notifications: informational, never late, never "missed"
       if (settings.zoneStartNotifications) {
         for (const e of zoneStartEvents(provider, windowStart, now)) {
           if (this.state.delivered[e.id]) continue;
@@ -155,65 +203,97 @@ class ReminderEngine {
           }
         }
       }
+    }
 
-      // 3. Snoozed reminders that are now due
-      const stillWaiting = [];
-      for (const snooze of this.state.snoozed) {
-        if (snooze.until > now) {
-          stillWaiting.push(snooze);
-          continue;
-        }
+    // 2. Full-screen alerts at the exact start time
+    if (alertsOn) {
+      for (const a of alertsInWindow(provider, tasks, windowStart, now, settings)) {
+        if (this.state.delivered[a.id]) continue;
+        this.state.delivered[a.id] = now;
         changed = true;
-        const occurrence = this.findOccurrence(tasks, provider, snooze.taskId, snooze.dateKey, settings);
-        if (!occurrence || occurrence.done) continue; // task deleted, moved away, or already done
-        const zone = deriveZone(provider, occurrence.start);
-        const item = {
-          kind: 'snooze',
-          id: `snooze:${occurrence.id}@${snooze.until}`,
-          occurrenceId: occurrence.id,
-          taskId: occurrence.taskId,
-          dateKey: occurrence.dateKey,
-          title: occurrence.title,
-          start: occurrence.start,
-          end: occurrence.end,
-          zoneName: zone.zoneName,
-          notifyAt: new Date(snooze.until),
-        };
-        if (now - snooze.until <= o.graceMs) {
+        if (now - a.start.getTime() <= o.alertGraceMs) {
+          alertsToShow.push(a);
+        } else {
+          // Too late to be an alert (the computer was off or asleep): it goes into the missed summary.
+          missed.push({
+            occurrenceId: a.occurrenceId, taskId: a.taskId, dateKey: a.dateKey, title: a.title,
+            start: a.start, notifyAt: a.start, zoneName: a.zoneName,
+          });
+        }
+      }
+    }
+
+    // 3. Snoozed reminders that are now due (as an alert if they were snoozed from an alert)
+    const stillWaiting = [];
+    for (const snooze of this.state.snoozed) {
+      if (snooze.until > now) {
+        stillWaiting.push(snooze);
+        continue;
+      }
+      changed = true;
+      const viaAlert = Boolean(snooze.fullScreen) && alertsOn;
+      if (!viaAlert && !toastsOn) continue; // that kind of reminder is switched off: dropped quietly
+      const occurrence = this.findOccurrence(tasks, provider, snooze.taskId, snooze.dateKey, settings);
+      if (!occurrence || occurrence.done) continue; // task deleted, moved away, or already done
+      const zone = deriveZone(provider, occurrence.start);
+      const item = {
+        kind: viaAlert ? 'alert' : 'snooze',
+        id: `snooze:${occurrence.id}@${snooze.until}`,
+        occurrenceId: occurrence.id,
+        taskId: occurrence.taskId,
+        dateKey: occurrence.dateKey,
+        title: occurrence.title,
+        notes: occurrence.notes,
+        priority: occurrence.priority,
+        categoryId: occurrence.categoryId,
+        durationMinutes: occurrence.durationMinutes,
+        start: occurrence.start,
+        end: occurrence.end,
+        zoneIndex: zone.zoneIndex,
+        zoneName: zone.zoneName,
+        notifyAt: new Date(snooze.until),
+        snoozed: true,
+      };
+      if (now - snooze.until <= o.graceMs) {
+        if (viaAlert) {
+          alertsToShow.push(item);
+        } else {
           const minutesUntil = Math.round((occurrence.start.getTime() - now) / MS_PER_MINUTE);
           toShow.push({
             sortAt: snooze.until,
             occurrenceId: occurrence.id,
             payload: formatTaskNotification(item, minutesUntil, settings),
           });
-          result.snoozed.push(item);
-        } else if (now - snooze.until <= o.lookbackMs) {
-          missed.push(item);
         }
+        result.snoozed.push(item);
+      } else if (now - snooze.until <= o.lookbackMs) {
+        missed.push(item);
       }
-      if (stillWaiting.length !== this.state.snoozed.length) this.state.snoozed = stillWaiting;
+    }
+    if (stillWaiting.length !== this.state.snoozed.length) this.state.snoozed = stillWaiting;
 
-      // Show on-time notifications, oldest first
-      toShow.sort((a, b) => a.sortAt - b.sortAt);
-      for (const { payload } of toShow) {
-        this.show(() => this.deps.notify(payload));
-        result.delivered.push(payload);
-      }
+    // Show on-time notifications, oldest first
+    toShow.sort((a, b) => a.sortAt - b.sortAt);
+    for (const { payload } of toShow) {
+      this.show(() => this.deps.notify(payload));
+      result.delivered.push(payload);
+    }
 
-      // Missed-reminders summary. A task that was just notified on time is not also "missed".
-      const notifiedNow = new Set(toShow.map((entry) => entry.occurrenceId).filter(Boolean));
-      const reallyMissed = missed.filter((r) => !notifiedNow.has(r.occurrenceId));
-      if (reallyMissed.length > 0) {
-        const items = summarizeMissed(reallyMissed, nowDate);
-        const payload = formatMissedNotification(items, settings);
-        result.missed = items;
-        this.show(() => (this.deps.onMissed ? this.deps.onMissed(items, payload) : this.deps.notify(payload)));
-      }
-    } else if (this.state.snoozed.length > 0) {
-      // Notifications are off: due snoozes are dropped quietly, future ones wait.
-      const before = this.state.snoozed.length;
-      this.state.snoozed = this.state.snoozed.filter((s) => s.until > now);
-      if (this.state.snoozed.length !== before) changed = true;
+    // Show the full-screen alert(s)
+    if (alertsToShow.length > 0) {
+      alertsToShow.sort((a, b) => a.start - b.start);
+      result.alerts = alertsToShow;
+      if (this.deps.showAlert) this.show(() => this.deps.showAlert(alertsToShow, settings));
+    }
+
+    // Missed-reminders summary. A task that was just notified on time is not also "missed".
+    const shownNow = new Set([...toShow, ...alertsToShow].map((entry) => entry.occurrenceId).filter(Boolean));
+    const reallyMissed = missed.filter((r) => !shownNow.has(r.occurrenceId));
+    if (reallyMissed.length > 0) {
+      const items = summarizeMissed(reallyMissed, nowDate);
+      const payload = formatMissedNotification(items, settings);
+      result.missed = items;
+      this.show(() => (this.deps.onMissed ? this.deps.onMissed(items, payload) : this.deps.notify(payload)));
     }
 
     // Forget old delivery records
@@ -256,8 +336,14 @@ class ReminderEngine {
       this.state.snoozed = this.state.snoozed.filter(
         (s) => !(s.taskId === action.taskId && s.dateKey === action.dateKey)
       );
-      this.state.snoozed.push({ taskId: action.taskId, dateKey: action.dateKey, until });
+      this.state.snoozed.push({
+        taskId: action.taskId,
+        dateKey: action.dateKey,
+        until,
+        ...(action.fullScreen ? { fullScreen: true } : {}),
+      });
       this.save(true);
+      this.reschedule();
       return { type: 'snooze', until: new Date(until) };
     }
 

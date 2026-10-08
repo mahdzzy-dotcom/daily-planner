@@ -100,6 +100,132 @@
     return section('Categories', list);
   }
 
+
+  // ---- Full-screen reminder ------------------------------------------------------------------------------
+
+  const FONTS = ['Segoe UI', 'Tahoma', 'Arial', 'Verdana', 'Georgia', 'Times New Roman'];
+  const PRESETS = [
+    ['dark', 'Dark'], ['light', 'Light'], ['highContrast', 'High contrast'], ['red', 'Red alert'], ['calm', 'Calm green'],
+  ];
+  const SAMPLE_ITEM = {
+    id: 'preview', taskId: '__sample__', dateKey: '2026-01-01', title: 'Study SQL: joins and subqueries',
+    notes: 'Open the exercises from yesterday.\nFinish chapter 4, then try the practice questions.',
+    startLabel: '12:00 PM', endLabel: '12:45 PM', durationLabel: '45m', zoneName: 'Dhuhr → Asr', zoneIndex: 2,
+    categoryName: 'Study', categoryColor: '#8b5cf6', priority: 'High', snoozed: false,
+  };
+
+  // setIn(object, ['name', 'size'], 90) -> a copy with that value changed
+  function setIn(object, keys, value) {
+    const copy = JSON.parse(JSON.stringify(object));
+    let node = copy;
+    keys.slice(0, -1).forEach((k) => { node = node[k]; });
+    node[keys[keys.length - 1]] = value;
+    return copy;
+  }
+  function getIn(object, keys) {
+    return keys.reduce((node, k) => node[k], object);
+  }
+  function nestedPatch(keys, value) {
+    return keys.reduceRight((inner, key) => ({ [key]: inner }), value);
+  }
+
+  function alertSection() {
+    const preview = h('div', { class: 'alert-preview', 'aria-label': 'Preview of the full-screen reminder' });
+
+    function drawPreview() {
+      const { frame } = DP.AlertView.render(preview, {
+        item: SAMPLE_ITEM, remaining: 0, appearance: DP.state.settings.alertAppearance,
+        snoozeMinutes: DP.state.settings.snoozeMinutes, guardActive: false,
+      }, null);
+      const fit = () => { frame.style.transform = `scale(${preview.clientWidth / 1280})`; };
+      fit();
+      requestAnimationFrame(fit);
+    }
+
+    // Change one appearance value. `commit` false = only update the preview while a slider is being dragged.
+    async function change(keys, value, commit = true) {
+      DP.state.settings = { ...DP.state.settings, alertAppearance: setIn(DP.state.settings.alertAppearance, keys, value) };
+      drawPreview();
+      if (!commit) return;
+      try {
+        DP.state.settings = await DP.call('saveSettings', { alertAppearance: nestedPatch(keys, value) });
+      } catch (error) {
+        DP.toast(error.message, 'error');
+        DP.state.settings = await DP.call('getSettings');
+        DP.renderSettings();
+      }
+    }
+
+    const value = (keys) => getIn(DP.state.settings.alertAppearance, keys);
+    const color = (keys, label) => h('input', { type: 'color', value: value(keys), 'aria-label': label, onchange: (e) => change(keys, e.target.value) });
+    const check = (keys, label) => h('label', { class: 'switch' },
+      h('input', { type: 'checkbox', checked: value(keys), 'aria-label': label, onchange: (e) => change(keys, e.target.checked) }), h('span', { text: label }));
+    const slider = (keys, min, max, label) => {
+      const readout = h('span', { class: 'hint', text: `${value(keys)} px` });
+      return h('span', { class: 'row tight' },
+        h('input', {
+          type: 'range', min: String(min), max: String(max), value: String(value(keys)), 'aria-label': label, style: { width: '220px' },
+          oninput: (e) => { readout.textContent = `${e.target.value} px`; change(keys, Number(e.target.value), false); },
+          onchange: (e) => change(keys, Number(e.target.value)),
+        }), readout);
+    };
+    const select = (keys, options, label) => h('select', { class: 'sel-auto', 'aria-label': label, onchange: (e) => change(keys, e.target.value) },
+      options.map(([v, l]) => h('option', { value: v, text: l, selected: value(keys) === v })));
+
+    const presets = h('div', { class: 'row' }, PRESETS.map(([key, label]) => h('button', {
+      class: 'btn small', type: 'button', text: label,
+      onclick: async () => {
+        const preset = await DP.call('getAlertPreset', key);
+        DP.state.settings = await DP.call('saveSettings', { alertAppearance: preset });
+        const y = window.scrollY;
+        DP.renderSettings();
+        window.scrollTo(0, y);
+      },
+    })));
+
+    const box = section('Full-screen reminder',
+      h('p', { class: 'dialog-message', text: 'At the exact start time of a task that has the full-screen alert switched on, a full-screen reminder covers the screen so it cannot be missed. It stays until you click a button.' }),
+      h('div', { class: 'settings-grid' },
+        row('Full-screen alerts', toggle('Allow full-screen alerts', DP.state.settings.fullScreenAlerts, (v) => save({ fullScreenAlerts: v }), 'Each task also has its own switch in the task form. With this off, no full-screen alert appears.')),
+        row('New tasks', toggle('Switch the full-screen alert on for new tasks', DP.state.settings.fullScreenDefaultForNewTasks, (v) => save({ fullScreenDefaultForNewTasks: v }))),
+        row('Screens', h('select', { class: 'sel-auto', 'aria-label': 'Screens', onchange: (e) => save({ alertScreens: e.target.value }) },
+          h('option', { value: 'all', text: 'All screens', selected: DP.state.settings.alertScreens === 'all' }),
+          h('option', { value: 'main', text: 'Main screen only', selected: DP.state.settings.alertScreens === 'main' }))),
+        row('Ready-made looks', presets),
+        row('Colors', h('div', { class: 'row' },
+          h('span', { text: 'Background' }), color(['backgroundColor'], 'Background color'),
+          h('span', { text: 'Text' }), color(['textColor'], 'Text color'),
+          h('span', { text: 'Accent' }), color(['accentColor'], 'Accent color'))),
+        row('Font', h('div', { class: 'row' },
+          select(['fontFamily'], FONTS.map((f) => [f, f]), 'Font'),
+          select(['alignment'], [['center', 'Centered'], ['left', 'Left aligned']], 'Alignment'))),
+        row('Task name', h('div', {},
+          slider(['name', 'size'], 24, 160, 'Task name size'),
+          h('div', { class: 'row', style: { marginTop: '8px' } }, color(['name', 'color'], 'Task name color'),
+            check(['name', 'bold'], 'Bold'), check(['name', 'italic'], 'Italic'), check(['name', 'uppercase'], 'CAPITALS')))),
+        row('Notes', h('div', {},
+          check(['notes', 'show'], 'Show the notes'),
+          h('div', { style: { marginTop: '8px' } }, slider(['notes', 'size'], 14, 96, 'Notes size')),
+          h('div', { class: 'row', style: { marginTop: '8px' } }, color(['notes', 'color'], 'Notes color'),
+            check(['notes', 'bold'], 'Bold'), check(['notes', 'italic'], 'Italic')))),
+        row('Details shown', h('div', { class: 'row' },
+          check(['show', 'time'], 'Time'), check(['show', 'duration'], 'Duration'), check(['show', 'zone'], 'Zone'),
+          check(['show', 'category'], 'Category'), check(['show', 'priority'], 'Priority')))),
+      h('div', { style: { marginTop: '16px' } },
+        preview,
+        h('div', { class: 'row', style: { marginTop: '10px' } },
+          h('button', {
+            class: 'btn', text: 'Preview full screen',
+            onclick: async () => {
+              try { await window.api.previewAlert(); } catch (error) { DP.toast(error.message, 'error'); }
+            },
+          }),
+          h('span', { class: 'hint', text: 'Shows the real full-screen reminder with an example task. Click "Got it" to close it.' }))));
+    requestAnimationFrame(drawPreview);
+    drawPreview();
+    return box;
+  }
+
   DP.renderSettings = function renderSettings() {
     const view = clear(document.getElementById('view'));
     const s = DP.state.settings;
@@ -167,6 +293,8 @@
           row('Background message', toggle('Show the "still running in the background" message', s.showBackgroundMessage, (v) => save({ showBackgroundMessage: v }), 'Shown once, the next time the window is closed. Closing the window keeps Daily Planner running in the tray so reminders keep working.')),
           row('Theme', theme),
           row('Working days', h('div', {}, workingDays, h('p', { class: 'hint', text: 'Used by "last working day" repeat rules.' }))))),
+
+      alertSection(),
 
       categoriesSection(),
 

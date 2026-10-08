@@ -412,6 +412,22 @@
     function renderReminders() {
       clear(remindersBox);
       const rem = f.reminders;
+      // The full-screen alert is independent of the reminder On/Off switch below.
+      remindersBox.appendChild(
+        h('div', { class: 'field' },
+          h('label', { class: 'switch' },
+            h('input', {
+              type: 'checkbox', id: 'f-fullscreen', checked: Boolean(rem.fullScreen),
+              onchange: (e) => { rem.fullScreen = e.target.checked; },
+            }),
+            h('span', { text: 'Full-screen alert at the start time', style: { fontWeight: '600' } })),
+          h('p', {
+            class: 'hint',
+            text: settings.fullScreenAlerts
+              ? 'At exactly the start time a full-screen reminder covers the screen until you click a button. Its look is set in Settings.'
+              : 'Full-screen alerts are switched off in Settings, so this will not show until they are switched on there.',
+          }))
+      );
       remindersBox.appendChild(
         h('div', { class: 'field' },
           h('div', { class: 'label', text: 'Reminder' }),

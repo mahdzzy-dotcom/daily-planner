@@ -14,7 +14,7 @@
 const path = require('path');
 const fs = require('fs');
 const {
-  app, BrowserWindow, ipcMain, dialog, Notification, Tray, Menu, nativeImage, powerMonitor,
+  app, BrowserWindow, ipcMain, dialog, Notification, Tray, Menu, nativeImage, powerMonitor, screen,
 } = require('electron');
 
 const { PlannerService, PUBLIC_METHODS } = require('./service');
@@ -23,6 +23,7 @@ const { ReminderEngine } = require('../core/reminder-engine');
 const { formatTime12 } = require('../core/time');
 const { createElectronNotifier, findActionUrlInArgv, APP_ID, PROTOCOL } = require('./toast');
 const { createTray } = require('./tray');
+const { createAlertManager, isValidAction } = require('./alert-window');
 
 const ICON = path.join(__dirname, 'icon.png');
 const STARTUP_ARG = '--hidden'; // given to the app when Windows starts it at login
@@ -34,6 +35,7 @@ let service = null;
 let engine = null;
 let notify = null;
 let trayController = null;
+let alertManager = null;
 let watchdog = null;
 let rendererReady = false;
 let quitting = false; // true only when the app is really being closed
@@ -230,6 +232,36 @@ function handleAction(action) {
   }
 }
 
+// ---- Full-screen alert ---------------------------------------------------------------------------------------
+
+function startAlerts() {
+  alertManager = createAlertManager({
+    BrowserWindow,
+    screen,
+    preloadPath: path.join(__dirname, 'alert-preload.js'),
+    pagePath: path.join(__dirname, '..', 'renderer', 'alert.html'),
+    getConfig: () => service.getAlertConfig(),
+    log,
+  });
+}
+
+// A button on the full-screen reminder was pressed.
+function handleAlertAction(sender, { type, itemId }) {
+  if (!alertManager || !alertManager.owns(sender) || !isValidAction(type)) return;
+  const item = alertManager.find(itemId);
+  if (!item) return;
+  alertManager.remove(itemId); // closes the screens when it was the last one
+
+  const sample = item.taskId === '__sample__'; // the preview from Settings does nothing for real
+  if (type === 'snooze' && !sample) {
+    engine.handleAction({ type: 'snooze', taskId: item.taskId, dateKey: item.dateKey, fullScreen: true });
+  } else if (type === 'done' && !sample) {
+    engine.handleAction({ type: 'done', taskId: item.taskId, dateKey: item.dateKey });
+  } else if (type === 'open' && !sample) {
+    handleAction({ type: 'open', taskId: item.taskId, dateKey: item.dateKey });
+  }
+}
+
 // ---- Reminder engine ---------------------------------------------------------------------------------------------------------
 
 function startEngine() {
@@ -250,6 +282,7 @@ function startEngine() {
         alreadyStarted: i.alreadyStarted,
       })));
     },
+    showAlert: (items) => alertManager.show(service.buildAlertItems(items)),
     updateTask: (task) => service.updateTaskFromEngine(task),
     initialState: service.getReminderState(),
     saveState: (state) => service.saveReminderState(state),
@@ -338,6 +371,18 @@ function registerIpc() {
     return { ok: true };
   });
 
+  ipcMain.handle('preview-alert', async () => {
+    alertManager.show([service.getAlertSample()]);
+    return { ok: true };
+  });
+
+  ipcMain.on('alert-ready', (event) => {
+    if (alertManager && alertManager.owns(event.sender)) alertManager.sendTo(event.sender);
+  });
+  ipcMain.on('alert-action', (event, message) => {
+    if (message && typeof message === 'object') handleAlertAction(event.sender, message);
+  });
+
   ipcMain.on('renderer-ready', () => {
     rendererReady = true;
     flushPendingEvents();
@@ -365,13 +410,17 @@ function start() {
     const store = new FileStore(path.join(app.getPath('userData'), 'data.json'));
     service = new PlannerService({
       store,
-      onDataChanged: () => sendToWindow('data-changed'),
+      onDataChanged: () => {
+        sendToWindow('data-changed');
+        if (engine) engine.reschedule(); // tasks or settings changed: re-aim the exact-time timer
+      },
       onSettingsChanged: applyStartWithWindows,
     });
     registerIpc();
     if (app.isPackaged) app.setAsDefaultProtocolClient(PROTOCOL);
     applyStartWithWindows(service.getSettings());
 
+    startAlerts();
     startEngine();
     startTray();
     startSystemWatch();
@@ -391,6 +440,7 @@ function start() {
     quitting = true;
     if (watchdog) clearInterval(watchdog);
     if (engine) engine.stop();
+    if (alertManager) alertManager.closeAll();
   });
   app.on('will-quit', () => {
     if (trayController) trayController.destroy();

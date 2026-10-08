@@ -6,7 +6,7 @@
 process.env.TZ = process.env.TZ || 'Africa/Cairo';
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const { createService, openApp } = require('./ui-harness');
+const { createService, openApp, openAlertPage } = require('./ui-harness');
 
 const playwright = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const executablePath = process.env.CHROMIUM_PATH || undefined;
@@ -199,6 +199,18 @@ async function setTime(page, hour, minute, ampm) {
     await page.click('.segmented[aria-label="Reminder on or off"] button:text-is("Off")');
     assert.equal((await page.$$('.chip')).length, 0);
     await page.keyboard.press('Escape');
+  });
+
+  await step('task form: the full-screen alert switch is off by default, can be switched on, and shows on the row', async () => {
+    await page.click('#add-btn');
+    await page.fill('#f-title', 'Alarm task');
+    assert.equal(await page.isChecked('#f-fullscreen'), false);
+    await page.check('#f-fullscreen');
+    await shot(page, 'form-fullscreen-switch');
+    await page.click('.dialog-footer .btn.primary');
+    await page.waitForSelector('.dialog', { state: 'detached' });
+    assert.match(await taskRow(page, 'Alarm task').textContent(), /Full-screen alert/);
+    assert.equal(service.data.tasks.find((t) => t.title === 'Alarm task').reminders.fullScreen, true);
   });
 
   console.log('Tasks relative to tasks');
@@ -394,7 +406,7 @@ async function setTime(page, hour, minute, ampm) {
   console.log('Settings');
   await step('every section is there', async () => {
     const titles = await page.$$eval('.settings-section h2', (els) => els.map((e) => e.textContent));
-    assert.deepEqual(titles, ['Prayer Times', 'Reminders & Notifications', 'Application', 'Categories', 'Data']);
+    assert.deepEqual(titles, ['Prayer Times', 'Reminders & Notifications', 'Application', 'Full-screen reminder', 'Categories', 'Data']);
     await shot(page, 'settings');
   });
   await step('prayer adjustment is saved and moves the zone boundary', async () => {
@@ -459,6 +471,63 @@ async function setTime(page, hour, minute, ampm) {
     await page.waitForSelector('.toast:has-text("Test notification sent")');
     assert.deepEqual(await page.evaluate(() => window.__exports), ['export', 'test-notification']);
   });
+  await step('full-screen reminder settings: colors, sizes, switches and looks are saved and the preview follows', async () => {
+    const preview = (fn, arg) => page.$eval('.alert-preview', fn, arg);
+    const setColor = (label, value) => page.$eval(`input[aria-label="${label}"]`, (el, v) => { el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); }, value);
+    const setSlider = (label, value) => page.$eval(`input[aria-label="${label}"]`, (el, v) => {
+      el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, value);
+
+    await setColor('Background color', '#336699');
+    await page.waitForTimeout(150);
+    assert.equal(service.getSettings().alertAppearance.backgroundColor, '#336699');
+    assert.equal(await preview((el) => el.querySelector('.alert-stage').style.getPropertyValue('--a-bg')), '#336699');
+
+    await setColor('Text color', '#ffeecc');
+    await setColor('Task name color', '#00ff00');
+    await setSlider('Task name size', 120);
+    await page.waitForTimeout(150);
+    assert.equal(service.getSettings().alertAppearance.name.size, 120);
+    assert.equal(service.getSettings().alertAppearance.name.color, '#00ff00');
+    assert.equal(await preview((el) => el.querySelector('.alert-name').style.fontSize), '120px');
+    assert.equal(await preview((el) => el.querySelector('.alert-name').style.color), 'rgb(0, 255, 0)');
+
+    await setSlider('Notes size', 50);
+    await page.click('label:has-text("CAPITALS") input');
+    await page.click('label:has-text("Italic") >> nth=0');
+    await page.selectOption('select[aria-label="Font"]', 'Georgia');
+    await page.selectOption('select[aria-label="Alignment"]', 'left');
+    await page.waitForTimeout(200);
+    const a = service.getSettings().alertAppearance;
+    assert.deepEqual([a.notes.size, a.name.uppercase, a.name.italic, a.fontFamily, a.alignment], [50, true, true, 'Georgia', 'left']);
+    assert.equal(await preview((el) => el.querySelector('.alert-name').style.textTransform), 'uppercase');
+    assert.match(await preview((el) => el.querySelector('.alert-stage').style.getPropertyValue('--a-font')), /Georgia/);
+    assert.equal(await preview((el) => el.querySelector('.alert-stage').style.getPropertyValue('--a-align')), 'left');
+
+    await page.click('label:has-text("Show the notes") input');
+    await page.click('input[aria-label="Zone"]');
+    await page.waitForTimeout(150);
+    assert.equal(await preview((el) => el.querySelectorAll('.alert-notes').length), 0, 'notes hidden');
+    assert.ok(!(await preview((el) => el.textContent)).includes('Zone:'), 'zone hidden');
+    await shot(page, 'settings-fullscreen');
+
+    await page.click('button:text-is("High contrast")');
+    await page.waitForFunction(() => document.querySelector('.alert-preview .alert-stage').style.getPropertyValue('--a-bg') === '#000000');
+    const hc = service.getSettings().alertAppearance;
+    assert.deepEqual([hc.backgroundColor, hc.name.uppercase, hc.name.size, hc.notes.show, hc.show.zone], ['#000000', true, 96, true, true]);
+
+    await page.click('label:has-text("Allow full-screen alerts") input');
+    await page.click('label:has-text("Switch the full-screen alert on for new tasks") input');
+    await page.selectOption('select[aria-label="Screens"]', 'main');
+    await page.waitForTimeout(200);
+    const st = service.getSettings();
+    assert.deepEqual([st.fullScreenAlerts, st.fullScreenDefaultForNewTasks, st.alertScreens], [false, true, 'main']);
+    await page.click('label:has-text("Allow full-screen alerts") input'); // back on
+
+    await page.click('button:text-is("Preview full screen")');
+    await page.waitForTimeout(150);
+    assert.ok((await page.evaluate(() => window.__exports)).includes('preview-alert'));
+  });
   await step('back to the Daily View keeps working', async () => {
     await page.click('.back-link');
     await page.waitForSelector('.zone');
@@ -470,6 +539,78 @@ async function setTime(page, hour, minute, ampm) {
   });
 
   await app.browser.close();
+
+  console.log('Full-screen reminder page');
+  await step('the page shows task name, notes and details, and ignores presses during the first moment', async () => {
+    const alert = await openAlertPage({ playwright, executablePath });
+    const base = require('../src/core').DEFAULT_ALERT_APPEARANCE;
+    const item = (id, title, extra = {}) => ({
+      id, taskId: `t-${id}`, dateKey: '2026-10-04', title, notes: 'Bring the red folder\nCall the office first', startLabel: '12:00 PM',
+      endLabel: '12:45 PM', durationLabel: '45m', zoneName: 'Dhuhr → Asr', zoneIndex: 2, categoryName: 'Work', categoryColor: '#3b82f6',
+      priority: 'High', snoozed: false, ...extra,
+    });
+    const p = alert.page;
+    await p.evaluate(([st]) => window.__render(st), [{ items: [item('a1', 'Team meeting'), item('a2', 'Second task')], appearance: base, snoozeMinutes: 7, guardMs: 600 }]);
+    const text = await p.textContent('body');
+    for (const part of ['Starts now', 'Team meeting', 'Bring the red folder', 'Call the office first', '12:00 PM', '45m', 'Dhuhr → Asr', 'Work', 'High priority', '1 more task starting now', 'Snooze 7 min']) {
+      assert.ok(text.includes(part), `shows "${part}"`);
+    }
+    assert.equal(await p.$$eval('.alert-actions button', (els) => els.every((b) => b.disabled)), true, 'buttons are locked at first');
+    await p.keyboard.press('Escape');
+    await p.click('.alert-actions button.primary', { force: true, timeout: 1000 }).catch(() => {});
+    assert.deepEqual(await p.evaluate(() => window.__actions), [], 'nothing was pressed through');
+
+    await p.waitForFunction(() => document.querySelector('.alert-actions button').disabled === false, null, { timeout: 3000 });
+    assert.equal(await p.evaluate(() => document.activeElement.textContent), 'Got it', '"Got it" is ready');
+    await shot(p, 'alert-ready');
+    await p.click('button[data-action="snooze"]');
+    await p.click('button[data-action="done"]');
+    await p.click('button[data-action="open"]');
+    await p.click('button[data-action="dismiss"]');
+    assert.deepEqual(await p.evaluate(() => window.__actions), [['snooze', 'a1'], ['done', 'a1'], ['open', 'a1'], ['dismiss', 'a1']]);
+    await p.keyboard.press('Escape');
+    assert.deepEqual((await p.evaluate(() => window.__actions)).pop(), ['dismiss', 'a1'], 'Escape = Got it');
+    assert.deepEqual(alert.errors, []);
+    await alert.browser.close();
+  });
+  await step('the page follows the chosen look', async () => {
+    const alert = await openAlertPage({ playwright, executablePath });
+    const p = alert.page;
+    const { DEFAULT_ALERT_APPEARANCE: base } = require('../src/core');
+    const look = JSON.parse(JSON.stringify(base));
+    Object.assign(look, { backgroundColor: '#112233', textColor: '#aabbcc', accentColor: '#ff00aa', fontFamily: 'Georgia', alignment: 'left' });
+    Object.assign(look.name, { size: 110, color: '#ffff00', bold: false, italic: true, uppercase: true });
+    Object.assign(look.notes, { size: 44, color: '#00ffff', bold: true, italic: true });
+    look.show = { time: true, duration: false, zone: false, category: false, priority: false };
+    await p.evaluate(([st]) => window.__render(st), [{
+      items: [{ id: 'x', taskId: 't', dateKey: '2026-10-04', title: 'Pay the bill', notes: 'Use the card', startLabel: '9:00 AM', endLabel: '9:30 AM',
+        durationLabel: '30m', zoneName: 'Fajr → Dhuhr', zoneIndex: 1, categoryName: 'Home', categoryColor: '#fff', priority: 'Low', snoozed: true }],
+      appearance: look, snoozeMinutes: 5, guardMs: 0,
+    }]);
+    const css = (sel, prop) => p.$eval(sel, (el, pr) => getComputedStyle(el)[pr], prop);
+    assert.equal(await css('.alert-stage', 'backgroundColor'), 'rgb(17, 34, 51)');
+    assert.equal(await css('.alert-name', 'fontSize'), '110px');
+    assert.equal(await css('.alert-name', 'color'), 'rgb(255, 255, 0)');
+    assert.equal(await css('.alert-name', 'fontStyle'), 'italic');
+    assert.equal(await css('.alert-name', 'textTransform'), 'uppercase');
+    assert.equal(await css('.alert-name', 'fontWeight'), '400');
+    assert.equal(await css('.alert-notes', 'fontSize'), '44px');
+    assert.equal(await css('.alert-notes', 'color'), 'rgb(0, 255, 255)');
+    assert.equal(await css('.alert-notes', 'fontWeight'), '700');
+    assert.match(await css('.alert-stage', 'fontFamily'), /Georgia/);
+    assert.equal(await css('.alert-stage', 'textAlign'), 'left');
+    assert.equal(await css('.alert-label', 'color'), 'rgb(255, 0, 170)');
+    const text = await p.textContent('.alert-info');
+    assert.ok(text.includes('9:00 AM') && !text.includes('30m') && !text.includes('Zone') && !text.includes('Home') && !text.includes('priority'));
+    assert.match(await p.textContent('.alert-label'), /Snoozed reminder/i);
+    // notes switched off
+    look.notes.show = false;
+    await p.evaluate(([st]) => window.__render(st), [{ items: [{ id: 'y', taskId: 't', dateKey: 'd', title: 'No notes shown', notes: 'hidden', startLabel: '1:00 PM', endLabel: '2:00 PM',
+      durationLabel: '1h 0m', zoneName: 'Dhuhr → Asr', zoneIndex: 2, categoryName: '', categoryColor: '', priority: 'Low', snoozed: false }], appearance: look, snoozeMinutes: 5, guardMs: 0 }]);
+    assert.equal((await p.$$('.alert-notes')).length, 0);
+    assert.deepEqual(alert.errors, []);
+    await alert.browser.close();
+  });
 
   console.log('First run');
   await step('the welcome screen asks for the city once, then the app is ready', async () => {

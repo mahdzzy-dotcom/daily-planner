@@ -17,7 +17,7 @@ const MAIN_PATH = require.resolve('../src/main/main.js');
 
 // ---- Stand-ins ------------------------------------------------------------------------------------------
 
-function makeFakeElectron({ userData, lock = true, saveTo, openFrom, packaged = false }) {
+function makeFakeElectron({ userData, lock = true, saveTo, openFrom, packaged = false, displays }) {
   const fake = {
     appId: null,
     quitCalled: false,
@@ -32,6 +32,7 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom, packaged = 
     loginSettings: [],
     powerEvents: {},
     dialogs: { saveTo, openFrom },
+    displays: displays || [{ id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 } }],
   };
 
   fake.app = {
@@ -54,14 +55,22 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom, packaged = 
       this.visible = false;
       this.shownCount = 0;
       this.hiddenCount = 0;
+      this.destroyed = false;
       this.webContents = {
         send: (channel, payload) => this.sent.push([channel, payload]),
         setWindowOpenHandler: () => {},
         on: () => {},
+        isDestroyed: () => this.destroyed,
       };
       fake.windows.push(this);
     }
     setMenuBarVisibility() {}
+    setAlwaysOnTop(flag, level) { this.alwaysOnTop = [flag, level]; }
+    destroy() {
+      this.destroyed = true;
+      this.visible = false;
+      (this.handlers.closed || []).forEach((fn) => fn({}));
+    }
     loadFile(file) { this.file = file; }
     on(event, fn) { (this.handlers[event] = this.handlers[event] || []).push(fn); }
     once(event, fn) { this.on(event, fn); }
@@ -71,7 +80,7 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom, packaged = 
       (this.handlers[event] || []).forEach((fn) => fn(e));
       return e;
     }
-    isDestroyed() { return false; }
+    isDestroyed() { return this.destroyed; }
     isMinimized() { return false; }
     restore() {}
     show() { this.visible = true; this.shownCount += 1; }
@@ -86,6 +95,10 @@ function makeFakeElectron({ userData, lock = true, saveTo, openFrom, packaged = 
     on(event, fn) { this.handlers[event] = fn; }
     destroy() { this.destroyed = true; }
     isDestroyed() { return this.destroyed; }
+  };
+  fake.screen = {
+    getAllDisplays: () => fake.displays,
+    getPrimaryDisplay: () => fake.displays[0],
   };
   fake.Menu = { buildFromTemplate: (template) => ({ template }) };
   fake.nativeImage = { createFromPath: (p) => ({ path: p, resize: (size) => ({ path: p, size }) }) };
@@ -163,7 +176,9 @@ async function launch(options = {}) {
   }
   fake.userData = userData;
   fake.main = mainModule;
-  fake.win = () => fake.windows[fake.windows.length - 1];
+  fake.win = () => fake.windows.find((w) => w.options.title === 'Daily Planner');
+  fake.alertWindows = () => fake.windows.filter((w) => w.options.title === 'Daily Planner reminder' && !w.destroyed);
+  fake.fire = (h, m, sec = 0) => tickEngineAt(fake, h, m, sec);
   fake.svc = (method, ...args) => fake.ipc.svc({}, method, args);
   fake.dataFile = () => JSON.parse(fs.readFileSync(path.join(userData, 'data.json'), 'utf8'));
   fake.settleDialogs = () => new Promise((resolve) => setImmediate(resolve));
@@ -180,6 +195,11 @@ function form(extra = {}) {
     title: 'Study', start: { mode: 'fixed', time: '23:00' }, durationMinutes: 30, date: '2030-01-10',
     recurrence: null, reminders: { enabled: true, offsets: [0] }, priority: 'Medium', categoryId: null, notes: '', ...extra,
   };
+}
+
+function tickEngineAt(fake, h, m, sec) {
+  const engine = fake.main.getEngine();
+  return engine.tick(new Date(2030, 0, 10, h, m, sec, 0));
 }
 
 const trayItem = (app, label) => app.trays[0].menu.template.find((item) => item.label === label);
@@ -327,8 +347,8 @@ test('Opening from the tray after the window was destroyed creates a new window'
   first.emit('closed');
   trayItem(app, 'Open / Show').click();
   assert.equal(app.windows.length, 2);
-  app.win().emit('ready-to-show');
-  assert.equal(app.win().visible, true);
+  app.windows[1].emit('ready-to-show');
+  assert.equal(app.windows[1].visible, true);
   app.cleanup();
 });
 
@@ -542,6 +562,283 @@ test('The test notification works, and so do its buttons (checks the link route 
   app.cleanup();
 });
 
+
+// ---- The full-screen alert -----------------------------------------------------------------------------------------
+
+function alertForm(extra = {}) {
+  return form({
+    title: 'Alert task', notes: 'Read these notes first', start: { mode: 'fixed', time: '12:00' },
+    reminders: { enabled: false, offsets: [], fullScreen: true }, ...extra,
+  });
+}
+
+const twoScreens = [
+  { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 } },
+  { id: 2, bounds: { x: 1920, y: 0, width: 1280, height: 1024 } },
+];
+
+test('Full-screen alert: at the start time one borderless window covers each screen, above everything', async () => {
+  const app = await launch({ displays: twoScreens });
+  await app.svc('saveTask', { mode: 'create', form: alertForm() });
+  app.fire(11, 59, 50);
+  assert.equal(app.alertWindows().length, 0, 'nothing before the start time');
+  app.fire(12, 0, 0);
+
+  const windows = app.alertWindows();
+  assert.equal(windows.length, 2, 'one per screen');
+  windows.forEach((win, i) => {
+    const o = win.options;
+    const b = twoScreens[i].bounds;
+    assert.deepEqual([o.x, o.y, o.width, o.height], [b.x, b.y, b.width, b.height]);
+    assert.equal(o.frame, false);
+    assert.equal(o.fullscreen, true);
+    assert.equal(o.alwaysOnTop, true);
+    assert.equal(o.skipTaskbar, true);
+    assert.equal(o.show, false);
+    assert.equal(o.webPreferences.contextIsolation, true);
+    assert.equal(o.webPreferences.nodeIntegration, false);
+    assert.equal(o.webPreferences.sandbox, true);
+    assert.ok(o.webPreferences.preload.endsWith('alert-preload.js') && fs.existsSync(o.webPreferences.preload));
+    assert.ok(win.file.endsWith('alert.html') && fs.existsSync(win.file));
+    assert.deepEqual(win.alwaysOnTop, [true, 'screen-saver']);
+    win.emit('ready-to-show');
+    assert.equal(win.visible, true);
+  });
+  assert.equal(app.alertWindows().length, 2);
+  app.cleanup();
+});
+
+test('Full-screen alert: the page is told what to show (title, notes, times, zone, look)', async () => {
+  const app = await launch();
+  await app.svc('saveTask', { mode: 'create', form: alertForm() });
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  const win = app.alertWindows()[0];
+  app.ipcOn['alert-ready']({ sender: win.webContents });
+  const [channel, state] = win.sent.find(([c]) => c === 'alert-render');
+  assert.equal(channel, 'alert-render');
+  assert.equal(state.items.length, 1);
+  const item = state.items[0];
+  assert.equal(item.title, 'Alert task');
+  assert.equal(item.notes, 'Read these notes first');
+  assert.equal(item.startLabel, '12:00 PM');
+  assert.equal(item.endLabel, '12:30 PM');
+  assert.equal(item.durationLabel, '30m');
+  assert.equal(item.zoneName, 'Dhuhr → Asr');
+  assert.equal(item.priority, 'Medium');
+  assert.equal(state.appearance.backgroundColor, '#0f172a');
+  assert.equal(state.snoozeMinutes, 5);
+  assert.equal(state.guardMs, 1500);
+  app.cleanup();
+});
+
+test('Full-screen alert: the plain notification at the start is replaced by it', async () => {
+  const app = await launch();
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ reminders: { enabled: true, offsets: [0], fullScreen: true } }) });
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  assert.equal(app.alertWindows().length, 1);
+  assert.equal(app.notifications.length, 0);
+  app.cleanup();
+});
+
+test('Full-screen alert buttons: Got it, Mark as Done, Snooze, Open task', async () => {
+  const app = await launch();
+  const { taskId } = await app.svc('saveTask', { mode: 'create', form: alertForm() });
+  app.win().emit('ready-to-show');
+  app.ipcOn['renderer-ready']();
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  const win = app.alertWindows()[0];
+  app.ipcOn['alert-ready']({ sender: win.webContents });
+  const itemId = win.sent.find(([c]) => c === 'alert-render')[1].items[0].id;
+
+  // Someone else (the main window) cannot press the alert's buttons
+  app.ipcOn['alert-action']({ sender: app.win().webContents }, { type: 'done', itemId });
+  assert.equal(app.alertWindows().length, 1);
+  // Unknown button / unknown task: ignored
+  app.ipcOn['alert-action']({ sender: win.webContents }, { type: 'format-disk', itemId });
+  app.ipcOn['alert-action']({ sender: win.webContents }, { type: 'done', itemId: 'nope' });
+  app.ipcOn['alert-action']({ sender: win.webContents }, null);
+  assert.equal(app.alertWindows().length, 1);
+  assert.equal(app.dataFile().tasks[0].completions['2030-01-10'], undefined);
+
+  // Snooze: the alert closes, and a snooze that will come back as an alert is stored
+  app.ipcOn['alert-action']({ sender: win.webContents }, { type: 'snooze', itemId });
+  assert.equal(app.alertWindows().length, 0);
+  const snoozed = app.dataFile().reminderState.snoozed;
+  assert.equal(snoozed.length, 1);
+  assert.equal(snoozed[0].fullScreen, true);
+  assert.equal(snoozed[0].taskId, taskId);
+  app.cleanup();
+});
+
+test('Full-screen alert: Mark as Done completes the task; Open task opens the app; Got it only closes', async () => {
+  const app = await launch();
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ title: 'One' }) });
+  app.win().emit('ready-to-show');
+  app.ipcOn['renderer-ready']();
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  let win = app.alertWindows()[0];
+  app.ipcOn['alert-ready']({ sender: win.webContents });
+  let itemId = win.sent.find(([c]) => c === 'alert-render')[1].items[0].id;
+  app.ipcOn['alert-action']({ sender: win.webContents }, { type: 'done', itemId });
+  assert.equal(app.alertWindows().length, 0);
+  assert.equal(app.dataFile().tasks[0].completions['2030-01-10'], true);
+
+  // Open task
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ title: 'Two', start: { mode: 'fixed', time: '13:00' } }) });
+  app.fire(12, 59, 50);
+  app.fire(13, 0, 0);
+  win = app.alertWindows()[0];
+  app.ipcOn['alert-ready']({ sender: win.webContents });
+  itemId = win.sent.filter(([c]) => c === 'alert-render').pop()[1].items[0].id;
+  const mainWin = app.win();
+  mainWin.visible = false;
+  app.ipcOn['alert-action']({ sender: win.webContents }, { type: 'open', itemId });
+  assert.equal(mainWin.visible, true, 'the main window is brought up');
+  const open = mainWin.sent.filter(([c]) => c === 'open-task').pop();
+  assert.equal(open[1].dateKey, '2030-01-10');
+  assert.equal(app.alertWindows().length, 0);
+
+  // Got it
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ title: 'Three', start: { mode: 'fixed', time: '14:00' } }) });
+  app.fire(13, 59, 50);
+  app.fire(14, 0, 0);
+  win = app.alertWindows()[0];
+  app.ipcOn['alert-ready']({ sender: win.webContents });
+  itemId = win.sent.filter(([c]) => c === 'alert-render').pop()[1].items[0].id;
+  app.ipcOn['alert-action']({ sender: win.webContents }, { type: 'dismiss', itemId });
+  assert.equal(app.alertWindows().length, 0);
+  assert.equal(app.dataFile().tasks.find((t) => t.title === 'Three').completions['2030-01-10'], undefined);
+  app.cleanup();
+});
+
+test('Full-screen alert: tasks starting together queue up on the same screens', async () => {
+  const app = await launch({ displays: twoScreens });
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ title: 'First' }) });
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ title: 'Second' }) });
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  assert.equal(app.alertWindows().length, 2, 'still just one window per screen');
+  const [a, b] = app.alertWindows();
+  app.ipcOn['alert-ready']({ sender: a.webContents });
+  const queue = a.sent.filter(([c]) => c === 'alert-render').pop()[1].items;
+  assert.equal(queue.length, 2);
+
+  app.ipcOn['alert-action']({ sender: b.webContents }, { type: 'dismiss', itemId: queue[0].id }); // pressed on the other screen
+  assert.equal(app.alertWindows().length, 2, 'the next task appears');
+  const next = a.sent.filter(([c]) => c === 'alert-render').pop()[1];
+  assert.deepEqual(next.items.map((i) => i.title), [queue[1].title]);
+  assert.equal(next.guardMs, 700, 'a short pause before the next one can be pressed');
+
+  app.ipcOn['alert-action']({ sender: a.webContents }, { type: 'dismiss', itemId: queue[1].id });
+  assert.equal(app.alertWindows().length, 0);
+  app.cleanup();
+});
+
+test('Full-screen alert: a task that starts while the alert is open joins the queue', async () => {
+  const app = await launch();
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ title: 'First' }) });
+  await app.svc('saveTask', { mode: 'create', form: alertForm({ title: 'Later', start: { mode: 'fixed', time: '12:05' } }) });
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  const win = app.alertWindows()[0];
+  app.fire(12, 5, 0);
+  assert.equal(app.alertWindows().length, 1);
+  const state = win.sent.filter(([c]) => c === 'alert-render').pop()[1];
+  assert.deepEqual(state.items.map((i) => i.title), ['First', 'Later']);
+  app.cleanup();
+});
+
+test('Full-screen alert: "Main screen only" uses just the primary screen', async () => {
+  const app = await launch({ displays: twoScreens });
+  await app.svc('saveSettings', { alertScreens: 'main' });
+  await app.svc('saveTask', { mode: 'create', form: alertForm() });
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  assert.equal(app.alertWindows().length, 1);
+  assert.equal(app.alertWindows()[0].options.x, 0);
+  app.cleanup();
+});
+
+test('Full-screen alert: the look chosen in Settings is what the page receives', async () => {
+  const app = await launch();
+  await app.svc('saveSettings', { alertAppearance: { backgroundColor: '#112233', name: { size: 120, uppercase: true }, notes: { show: false } } });
+  await app.svc('saveTask', { mode: 'create', form: alertForm() });
+  app.fire(11, 59, 50);
+  app.fire(12, 0, 0);
+  const win = app.alertWindows()[0];
+  assert.equal(win.options.backgroundColor, '#112233', 'no white flash before the page loads');
+  app.ipcOn['alert-ready']({ sender: win.webContents });
+  const { appearance } = win.sent.find(([c]) => c === 'alert-render')[1];
+  assert.equal(appearance.backgroundColor, '#112233');
+  assert.equal(appearance.name.size, 120);
+  assert.equal(appearance.name.uppercase, true);
+  assert.equal(appearance.name.bold, true, 'what was not changed stays');
+  assert.equal(appearance.notes.show, false);
+  app.cleanup();
+});
+
+test('Full-screen alert: the Preview button shows the real thing with an example, and does nothing real', async () => {
+  const app = await launch();
+  const result = await app.ipc['preview-alert']();
+  assert.equal(result.ok, true);
+  const win = app.alertWindows()[0];
+  app.ipcOn['alert-ready']({ sender: win.webContents });
+  const item = win.sent.find(([c]) => c === 'alert-render')[1].items[0];
+  assert.equal(item.taskId, '__sample__');
+  app.ipcOn['alert-action']({ sender: win.webContents }, { type: 'done', itemId: item.id });
+  assert.equal(app.alertWindows().length, 0);
+  assert.equal(app.dataFile().tasks.length, 0);
+  assert.equal(app.dataFile().reminderState.snoozed.length, 0);
+  app.cleanup();
+});
+
+test('Full-screen alert: switched off in Settings, nothing appears; quitting closes any open alert', async () => {
+  const off = await launch();
+  await off.svc('saveSettings', { fullScreenAlerts: false });
+  await off.svc('saveTask', { mode: 'create', form: alertForm() });
+  off.fire(11, 59, 50);
+  off.fire(12, 0, 0);
+  assert.equal(off.alertWindows().length, 0);
+  off.cleanup();
+
+  const on = await launch();
+  await on.svc('saveTask', { mode: 'create', form: alertForm() });
+  on.fire(11, 59, 50);
+  on.fire(12, 0, 0);
+  assert.equal(on.alertWindows().length, 1);
+  on.appEvents['before-quit'][0]();
+  assert.equal(on.alertWindows().length, 0);
+  on.cleanup();
+});
+
+test('New tasks follow the "switch on for new tasks" setting', async () => {
+  const app = await launch();
+  const before = await app.svc('newTaskDefaults', '2030-01-10');
+  assert.equal(before.reminders.fullScreen, false);
+  await app.svc('saveSettings', { fullScreenDefaultForNewTasks: true });
+  const after = await app.svc('newTaskDefaults', '2030-01-10');
+  assert.equal(after.reminders.fullScreen, true);
+  app.cleanup();
+});
+
+test('The alert page preload exposes only what it needs', () => {
+  const sent = [];
+  const exposed = {};
+  stand.electron = {
+    contextBridge: { exposeInMainWorld: (name, api) => { exposed[name] = api; } },
+    ipcRenderer: { send: (...args) => sent.push(args), on: () => {} },
+  };
+  delete require.cache[require.resolve('../src/main/alert-preload.js')];
+  require('../src/main/alert-preload.js');
+  assert.deepEqual(Object.keys(exposed.alertApi).sort(), ['action', 'onRender', 'ready']);
+  exposed.alertApi.action('done', 'abc');
+  assert.deepEqual(sent[0], ['alert-action', { type: 'done', itemId: 'abc' }]);
+});
+
 test('The preload script exposes only the expected functions', () => {
   const sent = [];
   const exposed = {};
@@ -551,7 +848,7 @@ test('The preload script exposes only the expected functions', () => {
   };
   delete require.cache[require.resolve('../src/main/preload.js')];
   require('../src/main/preload.js');
-  assert.deepEqual(Object.keys(exposed.api).sort(), ['call', 'exportData', 'importData', 'on', 'ready', 'testNotification']);
+  assert.deepEqual(Object.keys(exposed.api).sort(), ['call', 'exportData', 'importData', 'on', 'previewAlert', 'ready', 'testNotification']);
   exposed.api.call('getDay', '2030-01-10');
   assert.deepEqual(sent[0], ['svc', 'getDay', ['2030-01-10']]);
 });

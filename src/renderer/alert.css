@@ -1,0 +1,49 @@
+/* The full-screen reminder (also used, scaled down, for the preview in Settings). */
+
+.alert-page { margin: 0; overflow: hidden; background: #000; }
+.alert-page #alert-root { width: 100vw; height: 100vh; }
+
+.alert-frame { container-type: size; width: 100%; height: 100%; }
+
+.alert-stage {
+  --a-bg: #0f172a; --a-text: #e2e8f0; --a-accent: #fbbf24; --a-font: 'Segoe UI', Tahoma, Arial, sans-serif;
+  --a-align: center;
+  position: relative; box-sizing: border-box; width: 100%; height: 100%;
+  display: flex; flex-direction: column; justify-content: center;
+  align-items: var(--a-items, center);
+  padding: 5cqh 8cqw; gap: 3cqh;
+  background: var(--a-bg); color: var(--a-text); font-family: var(--a-font);
+  text-align: var(--a-align);
+}
+.alert-stage * { box-sizing: border-box; }
+
+.alert-label {
+  color: var(--a-accent); font-weight: 800; letter-spacing: 0.28em; font-size: 2.2cqmin; text-transform: uppercase;
+}
+.alert-name {
+  margin: 0; line-height: 1.12; max-width: 100%; overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.alert-notes {
+  max-width: min(100%, 1400px); max-height: 34cqh; overflow-y: auto; white-space: pre-wrap; line-height: 1.35;
+  overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.alert-info { display: flex; flex-wrap: wrap; gap: 1.4cqmin 3cqmin; justify-content: var(--a-items-justify, center); font-size: 3cqmin; }
+.alert-info .chip { display: inline-flex; align-items: center; gap: 1cqmin; opacity: 0.95; }
+.alert-info .chip b { font-weight: 700; }
+.alert-info .dot { width: 2cqmin; height: 2cqmin; border-radius: 50%; display: inline-block; }
+.alert-actions { display: flex; flex-wrap: wrap; gap: 2cqmin; justify-content: var(--a-items-justify, center); margin-top: 2cqh; }
+.alert-actions button {
+  font: inherit; font-size: 2.8cqmin; font-weight: 700; padding: 1.8cqmin 4cqmin; border-radius: 1.4cqmin; cursor: pointer;
+  color: var(--a-text); background: transparent; border: 0.35cqmin solid color-mix(in srgb, var(--a-text) 55%, transparent);
+}
+.alert-actions button:hover:not(:disabled) { background: color-mix(in srgb, var(--a-text) 14%, transparent); }
+.alert-actions button.primary { background: var(--a-accent); border-color: var(--a-accent); color: var(--a-bg); }
+.alert-actions button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--a-accent); }
+.alert-actions button:disabled { opacity: 0.35; cursor: default; }
+.alert-actions button:focus-visible { outline: 0.5cqmin solid var(--a-text); outline-offset: 0.6cqmin; }
+.alert-more { position: absolute; bottom: 4cqh; left: 0; right: 0; font-size: 2.4cqmin; opacity: 0.85; text-align: center; }
+.alert-guard { position: absolute; top: 3cqh; left: 0; right: 0; text-align: center; font-size: 2cqmin; opacity: 0.6; }
+
+/* The preview in Settings: the real thing, drawn 1280 x 720 and scaled down to fit */
+.alert-preview { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 10px; border: 1px solid var(--border); }
+.alert-preview .alert-frame { position: absolute; top: 0; left: 0; width: 1280px; height: 720px; transform-origin: top left; pointer-events: none; }

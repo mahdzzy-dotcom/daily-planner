@@ -9,7 +9,7 @@ const core = require('../core');
 
 const {
   CITIES, findCity, METHOD_KEYS, METHOD_LABELS,
-  mergeSettings, buildExport, parseImport,
+  mergeSettings, buildExport, parseImport, ALERT_PRESETS,
   createTask, validateTask, validateStart, validateRule, normalizeRule, describeRule, previewDates,
   occurrencesForPlanningDay, computeDayLayout, currentPlanningDayKey, getOccurrences, buildOccurrence,
   startAtDate, resolveStart, computeEnd, placementNote, setCompletion, editTask, deleteOccurrences,
@@ -140,6 +140,7 @@ class PlannerService {
       durationLabel: formatDuration(o.durationMinutes),
       isRecurring: o.isRecurring,
       hasReminders: reminderOffsets(o.reminders, this.settings).length > 0,
+      hasFullScreen: Boolean(o.reminders && o.reminders.fullScreen),
       done: o.done,
       overlaps: Boolean(o.overlaps),
       extendsPastZoneEnd: Boolean(o.extendsPastZoneEnd),
@@ -238,6 +239,65 @@ class PlannerService {
     });
   }
 
+  // ---- the full-screen alert ----------------------------------------------------------------------------------
+
+  // What the alert window shows for each task starting now (plain text and numbers only).
+  buildAlertItems(items) {
+    return items.map((i) => {
+      const category = this.categoryOf(i.categoryId);
+      return {
+        id: i.id,
+        taskId: i.taskId,
+        dateKey: i.dateKey,
+        title: i.title,
+        notes: i.notes || '',
+        startLabel: formatTime12(i.start),
+        endLabel: formatTime12(i.end),
+        durationLabel: formatDuration(i.durationMinutes),
+        zoneName: i.zoneName,
+        zoneIndex: i.zoneIndex,
+        categoryName: category ? category.name : '',
+        categoryColor: category ? category.color : '',
+        priority: i.priority,
+        snoozed: Boolean(i.snoozed),
+      };
+    });
+  }
+
+  // How the alert should look and behave right now.
+  getAlertConfig() {
+    const s = this.settings;
+    return { appearance: copy(s.alertAppearance), screens: s.alertScreens, snoozeMinutes: s.snoozeMinutes };
+  }
+
+  // One of the ready-made looks.
+  getAlertPreset(key) {
+    const preset = ALERT_PRESETS[key];
+    if (!preset) throw new Error('That look does not exist.');
+    return copy(preset.appearance);
+  }
+
+  // An example for the "Preview" button in Settings.
+  getAlertSample() {
+    const now = this.now();
+    return {
+      id: `sample-${now.getTime()}`,
+      taskId: '__sample__',
+      dateKey: dateKey(now),
+      title: 'Study SQL: joins and subqueries',
+      notes: 'Open the exercises from yesterday.\nFinish chapter 4, then try the practice questions.',
+      startLabel: formatTime12(now),
+      endLabel: formatTime12(new Date(now.getTime() + 45 * 60000)),
+      durationLabel: '45m',
+      zoneName: 'Dhuhr → Asr',
+      zoneIndex: 2,
+      categoryName: 'Study',
+      categoryColor: '#8b5cf6',
+      priority: 'High',
+      snoozed: false,
+    };
+  }
+
   // ---- the task form ---------------------------------------------------------------------------------------
 
   newTaskDefaults(forKey) {
@@ -248,7 +308,8 @@ class PlannerService {
       durationMinutes: 30,
       date: key,
       recurrence: null,
-      reminders: { enabled: true, offsets: [] }, // empty list = the default reminder time from Settings
+      // empty list = the default reminder time from Settings; the full-screen switch follows the Settings default
+      reminders: { enabled: true, offsets: [], fullScreen: Boolean(this.settings.fullScreenDefaultForNewTasks) },
       priority: 'Medium',
       categoryId: null,
       notes: '',
@@ -353,6 +414,7 @@ class PlannerService {
       reminders: {
         enabled: Boolean(form.reminders && form.reminders.enabled),
         offsets: form.reminders && Array.isArray(form.reminders.offsets) ? form.reminders.offsets : [],
+        fullScreen: Boolean(form.reminders && form.reminders.fullScreen),
       },
     };
     return { fields, recurrence: form.recurrence ? normalizeRule(form.recurrence) : null, date: form.date };
@@ -609,7 +671,7 @@ class PlannerService {
 // The names the window is allowed to call.
 const PUBLIC_METHODS = [
   'bootstrap', 'getDay', 'getUpcoming', 'newTaskDefaults', 'getTaskForEdit', 'previewForm', 'saveTask',
-  'getReferenceChoices', 'getDeleteImpact', 'deleteTask', 'setDone', 'duplicateTask', 'getSettings', 'saveSettings', 'addCategory', 'updateCategory',
+  'getReferenceChoices', 'getDeleteImpact', 'getAlertPreset', 'deleteTask', 'setDone', 'duplicateTask', 'getSettings', 'saveSettings', 'addCategory', 'updateCategory',
   'deleteCategory',
 ];
 

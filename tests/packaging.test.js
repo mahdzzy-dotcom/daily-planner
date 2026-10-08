@@ -107,6 +107,23 @@ test('the window page: every file it refers to exists; no inline scripts or styl
   assert.ok(!/\son\w+="/i.test(html), 'no inline event handlers');
 });
 
+test('the full-screen reminder page: its files exist, same security rules, and its preload ships inside the app', () => {
+  const dir = path.join(root, 'src/renderer');
+  const html = fs.readFileSync(path.join(dir, 'alert.html'), 'utf8');
+  assert.match(html, /Content-Security-Policy/);
+  assert.ok(html.includes("script-src 'self'"));
+  for (const ref of [...html.matchAll(/(?:src|href)="([^"#]+)"/g)].map((m) => m[1])) {
+    assert.ok(fs.existsSync(path.join(dir, ref)), `alert.html refers to ${ref}`);
+  }
+  assert.ok(!/<script(?![^>]*\bsrc=)[^>]*>/i.test(html), 'no inline <script>');
+  assert.ok(!/\sstyle="/i.test(html), 'no inline style attributes');
+  assert.ok(fs.existsSync(path.join(root, 'src/main/alert-preload.js')));
+  assert.ok(fs.existsSync(path.join(root, 'src/main/alert-window.js')));
+  // the settings page draws the same reminder as a preview
+  const index = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+  assert.ok(index.includes('alert-view.js') && index.includes('alert.css'));
+});
+
 test('the build workflows exist and do the right things', () => {
   const dir = path.join(root, '.github/workflows');
   const test = fs.readFileSync(path.join(dir, 'test.yml'), 'utf8');

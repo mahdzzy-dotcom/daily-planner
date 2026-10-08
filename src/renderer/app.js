@@ -27,6 +27,7 @@
     if (t.startWarning) tags.push(h('span', { class: 'tag warn', title: t.startWarning, text: '⚠ Backup start time' }));
     if (t.isRecurring) tags.push(h('span', { class: 'tag', title: 'Repeats', text: '↻ Repeats' }));
     if (t.hasReminders) tags.push(h('span', { class: 'tag', title: 'Reminder on', text: '🔔 Reminder' }));
+    if (t.hasFullScreen) tags.push(h('span', { class: 'tag', title: 'Full-screen alert at the start time', text: '⛶ Full-screen alert' }));
     if (t.overlaps) tags.push(h('span', { class: 'tag warn', title: 'Overlaps another task', text: '⚠ Overlaps' }));
     if (t.extendsPastZoneEnd) tags.push(h('span', { class: 'tag', title: 'Continues into the next zone', text: '→ Continues into next zone' }));
     if (t.overdue) tags.push(h('span', { class: 'tag late', text: 'Not done' }));

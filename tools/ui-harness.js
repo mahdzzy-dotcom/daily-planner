@@ -56,6 +56,7 @@ async function openApp({ playwright, service, colorScheme = 'light', width = 110
       exportData: async () => { window.__exports.push('export'); return { ok: true }; },
       importData: async () => ({ canceled: true }),
       testNotification: async () => { window.__exports.push('test-notification'); return { ok: true }; },
+      previewAlert: async () => { window.__exports.push('preview-alert'); return { ok: true }; },
       on: (channel, cb) => { (window.__handlers = window.__handlers || {})[channel] = cb; },
     };
   });
@@ -65,4 +66,26 @@ async function openApp({ playwright, service, colorScheme = 'light', width = 110
   return { browser, context, page, errors, calls };
 }
 
-module.exports = { createService, openApp, exampleProvider, at };
+// Opens the full-screen reminder page on its own, with a stand-in for the main process.
+// Call page.evaluate(() => window.__render(state)) to show something; button presses are collected in window.__actions.
+async function openAlertPage({ playwright, executablePath, width = 1920, height = 1080 }) {
+  const browser = await playwright.chromium.launch({ executablePath });
+  const context = await browser.newContext({ viewport: { width, height } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
+  await page.addInitScript(() => {
+    window.__actions = [];
+    window.alertApi = {
+      onRender: (cb) => { window.__render = cb; },
+      ready: () => { window.__ready = true; },
+      action: (type, itemId) => window.__actions.push([type, itemId]),
+    };
+  });
+  await page.goto(`file://${path.resolve(__dirname, '../src/renderer/alert.html')}`);
+  await page.waitForFunction(() => window.__ready === true);
+  return { browser, page, errors };
+}
+
+module.exports = { createService, openApp, openAlertPage, exampleProvider, at };
